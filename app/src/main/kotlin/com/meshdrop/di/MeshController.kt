@@ -35,6 +35,18 @@ class MeshController(
     val incoming: StateFlow<List<IncomingRequest>> = engine.incoming
     val deviceName: StateFlow<String> = preferences.deviceName
 
+    /**
+     * The device the user most recently tapped. Kept in memory (not in a flow) because it is
+     * pure navigation context: the Send screen reads it once on entry.
+     */
+    @Volatile
+    var selectedPeer: PeerDevice? = null
+        private set
+
+    fun selectPeer(peer: PeerDevice) {
+        selectedPeer = peer
+    }
+
     /** TCP port we accept transfers on, or 0 while the receiver is off. */
     val localPort: Int get() = engine.localPort
 

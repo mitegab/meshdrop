@@ -12,6 +12,8 @@ jobs:
     name: Build & unit test
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -32,37 +34,65 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      # The whole log (filtered) is echoed into the job summary on failure, which makes CI
-      # output reachable through the API even when raw logs are not.
-      - name: Compile, lint and assemble the debug APK
+      # Raw CI logs are not reachable from every environment, so failures are also emitted as
+      # workflow annotations and as a commit comment.
+      - name: Compile and assemble the debug APK
         run: |
           set +e
           ./gradlew assembleDebug --stacktrace > build.log 2>&1
           code=$?
-          {
-            echo "## assembleDebug (exit $code)"
-            echo '```'
-            grep -E "^(e:|w:|FAILURE:|.*FAILED|.*error:|.*What went wrong)" build.log | head -80
-            echo "… last lines …"
-            tail -40 build.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" -ne 0 ]; then
+            grep -E "^e: " build.log | head -15 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
           exit $code
+
+      - name: Publish compile log
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "### assembleDebug failed"
+            echo '```'
+            grep -E "^(e:|w:|FAILURE:|.*FAILED|.*What went wrong|\* )" build.log | head -60
+            echo "---- last lines ----"
+            tail -30 build.log
+            echo '```'
+          } > comment.md
+          gh api --method POST "/repos/$GH_REPO/commits/${{ github.sha }}/comments" \
+            -F body=@comment.md || true
 
       - name: Run JVM unit tests
         run: |
           set +e
           ./gradlew testDebugUnitTest --stacktrace > test.log 2>&1
           code=$?
-          {
-            echo "## testDebugUnitTest (exit $code)"
-            echo '```'
-            grep -E "^(e:|w:|FAILURE:|.*FAILED|.*error:|.*What went wrong)" test.log | head -80
-            echo "… last lines …"
-            tail -40 test.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" -ne 0 ]; then
+            grep -E "^e: " test.log | head -15 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
           exit $code
+
+      - name: Publish test log
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "### testDebugUnitTest failed"
+            echo '```'
+            grep -E "^(e:|w:|FAILURE:|.*FAILED|.*What went wrong|\* )" test.log | head -60
+            echo "---- last lines ----"
+            tail -30 test.log
+            echo '```'
+          } > comment.md
+          gh api --method POST "/repos/$GH_REPO/commits/${{ github.sha }}/comments" \
+            -F body=@comment.md || true
 
       - name: Upload debug APK
         if: success()
