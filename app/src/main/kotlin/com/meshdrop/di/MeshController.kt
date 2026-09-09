@@ -56,18 +56,32 @@ class MeshController(
         port = port,
     )
 
-    /** Starts the receiver and makes this device discoverable. Safe to call repeatedly. */
+    /** Port we are currently advertising, so repeated start() calls are cheap. */
+    private var advertisedPort = 0
+
+    /**
+     * Starts the receiver and makes this device discoverable.
+     *
+     * Called from the activity's `onStart` and from both screens, so it has to be cheap when
+     * nothing changed: we only re-advertise when the listening port actually moved.
+     */
     suspend fun start() = mutex.withLock {
         val port = engine.startReceiving()
         if (port <= 0) {
             MeshLog.w(TAG, "Could not start the receiver; skipping discovery")
             return
         }
+        if (advertisedPort == port) {
+            discovery.startScan()
+            return
+        }
+        advertisedPort = port
         discovery.start(identity(port))
         MeshLog.i(TAG, "MeshDrop is live as ${identity(port).deviceName} on port $port")
     }
 
     suspend fun stop() = mutex.withLock {
+        advertisedPort = 0
         discovery.stop()
         engine.stopReceiving()
     }
@@ -75,6 +89,7 @@ class MeshController(
     /** Re-advertises with a fresh port (used after a restart or a name change). */
     suspend fun reAdvertise() = mutex.withLock {
         discovery.stop()
+        advertisedPort = engine.localPort
         discovery.start(identity())
     }
 

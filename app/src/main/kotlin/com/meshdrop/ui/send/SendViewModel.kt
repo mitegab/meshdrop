@@ -16,7 +16,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -83,11 +85,14 @@ class SendViewModel(
     fun onFilesPicked(uris: List<Uri>) {
         if (uris.isEmpty()) return
         viewModelScope.launch {
-            val described = uris.mapNotNull { uri ->
-                runCatching {
-                    documentRepository.persistReadPermission(uri)
-                    documentRepository.describe(uri)
-                }.getOrNull()
+            // ContentResolver queries are disk I/O: keep them off the main thread.
+            val described = withContext(Dispatchers.IO) {
+                uris.mapNotNull { uri ->
+                    runCatching {
+                        documentRepository.persistReadPermission(uri)
+                        documentRepository.describe(uri)
+                    }.getOrNull()
+                }
             }
             if (described.isEmpty()) {
                 _uiState.update { it.copy(error = "Those files could not be read") }
