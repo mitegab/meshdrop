@@ -6,6 +6,7 @@ import com.meshdrop.core.util.MeshLog
 import com.meshdrop.data.ReceivedFileSink
 import com.meshdrop.data.ReceivedFileStore
 import com.meshdrop.transfer.protocol.ControlMessages
+import com.meshdrop.transfer.protocol.HandshakeResponse
 import com.meshdrop.transfer.protocol.Http
 import com.meshdrop.transfer.protocol.Http.copyToWithProgress
 import com.meshdrop.transfer.protocol.Http.readExactly
@@ -172,7 +173,7 @@ class TransferServer(
         )
 
         // Long poll: the peer waits here until a human taps Accept or Reject.
-        val accepted = withTimeoutOrNull(TransferProtocol.HANDSHAKE_TIMEOUT_MS) {
+        val accepted = withTimeoutOrNull(TransferProtocol.HANDSHAKE_TIMEOUT_MS.toLong()) {
             handler.requestApproval(incoming)
         }
 
@@ -282,25 +283,25 @@ class TransferServer(
         private const val MAX_CONTROL_BYTES = 256 * 1024L
 
         private fun acceptedJson(): String =
-            controlJson(ControlMessages.HandshakeResponse.Decision.ACCEPTED, null)
+            controlJson(HandshakeResponse.Decision.ACCEPTED, null)
 
         private fun rejectedJson(): String =
             controlJson(
-                ControlMessages.HandshakeResponse.Decision.REJECTED,
+                HandshakeResponse.Decision.REJECTED,
                 "The user declined the transfer",
             )
 
         private fun timeoutJson(): String =
             controlJson(
-                ControlMessages.HandshakeResponse.Decision.TIMEOUT,
+                HandshakeResponse.Decision.TIMEOUT,
                 "No answer within ${TransferProtocol.HANDSHAKE_TIMEOUT_MS / 1000}s",
             )
 
         private fun controlJson(
-            decision: ControlMessages.HandshakeResponse.Decision,
+            decision: HandshakeResponse.Decision,
             message: String?,
         ): String = with(ControlMessages) {
-            ControlMessages.HandshakeResponse(decision, message).toJson()
+            HandshakeResponse(decision, message).toJson()
         }
 
         private fun uploadAckJson(ack: UploadAck): String = with(ControlMessages) { ack.toJson() }

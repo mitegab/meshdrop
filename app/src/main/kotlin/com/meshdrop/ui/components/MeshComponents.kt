@@ -1,6 +1,5 @@
 package com.meshdrop.ui.components
 
-import androidx.compose.animation.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -30,7 +29,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -190,7 +188,6 @@ fun TransferJobCard(
     modifier: Modifier = Modifier,
     onCancel: (() -> Unit)? = null,
 ) {
-    val progress by animateFloatAsState(targetValue = job.progress, label = "progress")
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -226,7 +223,7 @@ fun TransferJobCard(
             }
 
             LinearProgressIndicator(
-                progress = progress,
+                progress = job.progress,
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(50)),

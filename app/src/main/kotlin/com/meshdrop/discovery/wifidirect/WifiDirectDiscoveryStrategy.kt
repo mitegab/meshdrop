@@ -36,7 +36,7 @@ class WifiDirectDiscoveryStrategy : DiscoveryStrategy {
         StrategyStatus(note = "Wi-Fi Direct is not enabled in the MVP build"),
     ).asStateFlow()
 
-    override val peers: StateFlow<List<PeerDevice>> = MutableStateFlow(emptyList()).asStateFlow()
+    override val peers: StateFlow<List<PeerDevice>> = MutableStateFlow<List<PeerDevice>>(emptyList()).asStateFlow()
 
     override suspend fun startAdvertising(identity: LocalIdentity) = Unit
 

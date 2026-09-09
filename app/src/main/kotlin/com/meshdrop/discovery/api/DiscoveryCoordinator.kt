@@ -34,6 +34,10 @@ class DiscoveryCoordinator(
     private val strategies: List<DiscoveryStrategy>,
     private val scope: CoroutineScope,
     private val now: () -> Long = { System.currentTimeMillis() },
+    /** How long a peer stays in the list without a fresh advertisement. */
+    private val peerTtl: Duration = DEFAULT_PEER_TTL,
+    /** How often stale peers are swept (also bounds how quickly merges are re-evaluated). */
+    private val sweepInterval: Duration = DEFAULT_SWEEP_INTERVAL,
 ) {
 
     /** Bumped on a timer so stale peers disappear from [peers] even if nothing else changes. */
@@ -44,7 +48,7 @@ class DiscoveryCoordinator(
             lists.fold(emptyList<PeerDevice>()) { acc, list -> acc + list }
         }
             .combine(sweep) { devices, _ ->
-                val cutoff = now() - PEER_TTL.inWholeMilliseconds
+                val cutoff = now() - peerTtl.inWholeMilliseconds
                 devices
                     .filter { it.lastSeenMillis >= cutoff }
                     .mergeByDeviceId()
@@ -70,7 +74,7 @@ class DiscoveryCoordinator(
     init {
         scope.launch {
             while (true) {
-                delay(SWEEP_INTERVAL)
+                delay(sweepInterval)
                 sweep.update { it + 1 }
             }
         }
@@ -128,8 +132,9 @@ class DiscoveryCoordinator(
 
     companion object {
         const val TAG = "Discovery"
+
         /** A peer that has been quiet for this long is considered gone. */
-        val PEER_TTL = 20.seconds
-        private val SWEEP_INTERVAL = 3.seconds
+        val DEFAULT_PEER_TTL = 20.seconds
+        val DEFAULT_SWEEP_INTERVAL = 3.seconds
     }
 }

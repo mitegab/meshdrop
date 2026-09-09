@@ -171,7 +171,7 @@ class ReceivedFileStore(private val context: Context) {
     companion object {
         const val TAG = "ReceivedFileStore"
         const val FOLDER_NAME = "MeshDrop"
-        const val RELATIVE_PATH = "${Environment.DIRECTORY_DOWNLOADS}/$FOLDER_NAME"
+        val RELATIVE_PATH = "${Environment.DIRECTORY_DOWNLOADS}/$FOLDER_NAME"
         const val FALLBACK_MIME = "application/octet-stream"
     }
 }

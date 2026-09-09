@@ -8,6 +8,7 @@ import com.meshdrop.data.DocumentRepository
 import com.meshdrop.data.FileSpooler
 import com.meshdrop.transfer.protocol.ControlMessages
 import com.meshdrop.transfer.protocol.FileMeta
+import com.meshdrop.transfer.protocol.HandshakeRequest
 import com.meshdrop.transfer.protocol.Http
 import com.meshdrop.transfer.protocol.Http.readResponse
 import com.meshdrop.transfer.protocol.Http.writeRequest
@@ -124,7 +125,7 @@ class TransferClient(
         senderName: String,
         files: List<TransferFile>,
     ): SendOutcome {
-        val request = ControlMessages.HandshakeRequest(
+        val request = HandshakeRequest(
             batchId = batchId,
             senderId = senderId,
             senderName = senderName,
