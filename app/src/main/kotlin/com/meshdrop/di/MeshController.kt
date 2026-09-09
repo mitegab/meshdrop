@@ -1,0 +1,95 @@
+package com.meshdrop.di
+
+import com.meshdrop.core.model.IncomingRequest
+import com.meshdrop.core.model.PeerDevice
+import com.meshdrop.core.model.TransferFile
+import com.meshdrop.core.prefs.UserPreferences
+import com.meshdrop.core.util.MeshLog
+import com.meshdrop.discovery.api.DiscoveryCoordinator
+import com.meshdrop.discovery.api.LocalIdentity
+import com.meshdrop.transfer.TransferEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+/**
+ * The single object the UI talks to.
+ *
+ * It hides the fact that "being visible on the network" is really two things — running a
+ * transfer server and advertising it through every discovery strategy — and keeps the
+ * advertised port in sync with the server that is actually listening.
+ */
+class MeshController(
+    private val preferences: UserPreferences,
+    private val discovery: DiscoveryCoordinator,
+    private val engine: TransferEngine,
+) {
+
+    private val mutex = Mutex()
+
+    val peers: StateFlow<List<PeerDevice>> = discovery.peers
+    val discoveryState = discovery.state
+    val strategyStatuses = discovery.strategyStatuses
+    val jobs = engine.jobs
+    val incoming: StateFlow<List<IncomingRequest>> = engine.incoming
+    val deviceName: StateFlow<String> = preferences.deviceName
+
+    /** TCP port we accept transfers on, or 0 while the receiver is off. */
+    val localPort: Int get() = engine.localPort
+
+    fun identity(port: Int = engine.localPort): LocalIdentity = LocalIdentity(
+        deviceId = preferences.deviceId,
+        deviceName = preferences.deviceName.value,
+        port = port,
+    )
+
+    /** Starts the receiver and makes this device discoverable. Safe to call repeatedly. */
+    suspend fun start() = mutex.withLock {
+        val port = engine.startReceiving()
+        if (port <= 0) {
+            MeshLog.w(TAG, "Could not start the receiver; skipping discovery")
+            return
+        }
+        discovery.start(identity(port))
+        MeshLog.i(TAG, "MeshDrop is live as ${identity(port).deviceName} on port $port")
+    }
+
+    suspend fun stop() = mutex.withLock {
+        discovery.stop()
+        engine.stopReceiving()
+    }
+
+    /** Re-advertises with a fresh port (used after a restart or a name change). */
+    suspend fun reAdvertise() = mutex.withLock {
+        discovery.stop()
+        discovery.start(identity())
+    }
+
+    /** Forces a new scan pass — wired to the refresh button on the Home screen. */
+    suspend fun refresh() = mutex.withLock {
+        discovery.refresh(identity())
+    }
+
+    fun setDeviceName(name: String) {
+        preferences.setDeviceName(name)
+    }
+
+    // region transfers --------------------------------------------------------------------
+
+    suspend fun send(peer: PeerDevice, files: List<TransferFile>): String = engine.send(peer, files)
+
+    fun approve(batchId: String) = engine.approve(batchId)
+
+    fun reject(batchId: String) = engine.reject(batchId)
+
+    fun cancel(jobId: String) = engine.cancel(jobId)
+
+    fun clearFinished() = engine.clearFinished()
+
+    // endregion
+
+    companion object {
+        const val TAG = "MeshController"
+    }
+}
