@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        The Activity only provides a window + background for the instant before Compose
+        takes over; every colour the user actually sees comes from MeshDropTheme.
+    -->
+    <style name="Theme.MeshDrop" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
+    </style>
+</resources>
