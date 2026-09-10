@@ -3,13 +3,13 @@ package com.meshdrop.transfer.crypto
 import com.meshdrop.core.model.EndpointRole
 import com.meshdrop.core.model.EncryptionMode
 import com.meshdrop.core.util.MeshLog
-import java.security.KeyAgreement
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.PrivateKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.Arrays
+import javax.crypto.KeyAgreement
 
 /** What a peer publishes so we can build a shared secret with it. */
 data class PeerKeyMaterial(

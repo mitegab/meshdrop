@@ -68,7 +68,7 @@ data class HandshakeRequest(
     val senderName: String,
     val files: List<FileMeta>,
     /** Our half of the key exchange; absent when this peer cannot (or will not) encrypt. */
-    val security: SecurityOffer? = null,
+    val security: SecurityOfferDto? = null,
 )
 
 /** One side of the key exchange, base64 encoded for the JSON body. */

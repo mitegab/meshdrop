@@ -30,14 +30,43 @@ device-to-device over a plain TCP socket. **No accounts, no cloud, no server.**
 | Nearby device list | ✅ live, merged across transports, expires stale peers |
 | Progress, speed, ETA, success/failure | ✅ per file and per batch |
 | Receiver accepts/rejects | ✅ in-app card **and** a notification with Accept/Reject |
+| End-to-end encryption | ✅ ECDH-P256 → HKDF → AES-256-GCM, one tag per 64 KB chunk |
+| Peer verification | ✅ six digit safety code (SAS) + remembered identity fingerprints |
+| Vault for received files | ✅ app-private storage, gated by the device lock |
+| Live transfer telemetry | ✅ smoothed speed/ETA, lane strip, Canvas throughput graph |
 | Runs without internet/cloud/accounts | ✅ LAN only; identity is a random local device id |
-| Wi-Fi Direct / Bluetooth transport | 🚧 seams in place, see [Adding a transport](#adding-a-transport) |
+| Wi-Fi Direct / Bluetooth / USB-C transport | 🚧 seams in place, see [Adding a transport](#adding-a-transport) |
 
 ## Screens
 
-| Home | Send | Receive |
-| --- | --- | --- |
-| Who you are, Send/Receive tiles, live nearby devices, recent activity | Pick files → pick a device → watch progress (speed, ETA, cancel) | Visible-as card, incoming accept/reject cards, download progress, open received files |
+| Screen | What it does |
+| --- | --- |
+| **Home** | Two giant Send / Receive zones, a live *Nearby devices* strip, and a radar pulse that means "scanning" without a line of text. Tapping a device jumps straight into the file picker. |
+| **Send** | Category picker (photos / videos / any file, multi-select) → one-line trust indicator → layered progress → summary. |
+| **Receive** | Visible-as card, incoming accept/reject cards (with the safety code shown *before* you decide), download progress, landed files. |
+| **History** | Day-grouped feed with thumbnails, provenance (who sent it, verified badge, integrity tick) and swipe to re-share, move to vault or delete. |
+| **Settings** | Encryption, verification, vault lock and the no-telemetry statement at the top; transport backends in a collapsed *Transports* section. |
+
+### Design: progressive disclosure
+
+The core rule is that 90% of people want "send this file to that phone, fast" and should never
+have to look at a state machine diagram. So:
+
+* **Motion replaces text.** The radar says "I am looking"; the lane strip says "bytes are going
+  through *here*"; the assembly bar says "this file is nearly whole". No chart library — the
+  throughput graph and route topology are `Canvas` code.
+* **One sealed state drives the transfer screen.** `TransferSessionState` (Idle → Discovering →
+  AwaitingApproval / IncomingOffer → Active → Finished) is the only thing the UI reads, so the
+  screen is a pure function of state.
+* **Readouts are smoothed before they reach a composable.** `TransferTelemetry` (domain) applies
+  an EMA, quantises to a step ladder and only accepts a new ETA when it moved by more than 1 s
+  *and* 15%, so speed and ETA never flicker.
+* **Power-user detail is behind one tap.** Swarm peer chips, retransmits, protocol version and
+  cipher live in a collapsed *Network details* panel on the transfer card.
+* **Security is one line until you ask for more.** "Verified" / "Unverified" / "Not encrypted",
+  tap to expand into plain language plus the safety code. No security vocabulary in the default
+  path.
+* **Dark first.** This is a systems tool used at night next to a router, not a productivity app.
 
 ## How it works
 
@@ -101,7 +130,38 @@ a tap on *Cancel* stops within one buffer.
   failed transfer never leaves a truncated file behind.
 * Sharing/opening a received file goes through `FileProvider` (no `file://` Uris).
 
-### 4. Permissions
+### 4. Security
+
+Every transfer negotiates an ephemeral session before a single byte moves:
+
+1. Each device holds a **long-term P-256 identity key** in the Android keystore
+   (`DeviceIdentity`, alias `meshdrop_identity_v1`). Its fingerprint is the first six bytes of
+   `SHA-256(pubkey)`, printed as `4f:2a:91:0c:7d:e3`.
+2. The sender offers a **fresh ephemeral P-256 key** in the handshake, signed with the identity
+   key. The receiver does the same when it accepts.
+3. Both sides run ECDH and derive three keys with **HKDF-SHA256** (`meshdrop/v1/send`,
+   `/receive`, `/sas`): a send key, a receive key, and the **safety code** — six digits the two
+   humans compare out loud.
+4. The payload is framed as `length ‖ nonce ‖ ciphertext+tag` with **AES-256-GCM** per 64 KB
+   chunk; the nonce is `salt ‖ counter`, so no nonce is ever reused.
+
+What the user sees of that:
+
+| State | Shown as | Meaning |
+| --- | --- | --- |
+| Safety code compared (or peer remembered) | **Verified** | Nobody else could have derived these keys |
+| Encrypted, first contact | **Unverified · encrypted** | Encrypted, but nothing proves who is on the other end yet |
+| No key material offered | **Not encrypted** | Older MeshDrop peer, or encryption switched off |
+
+Integrity is not a promise: a tampered chunk fails its GCM tag, the file is aborted, and the
+receiver is told *"Integrity check failed: the bytes were modified in transit"*. A completed
+file whose every tag checked out is marked **integrity checked** in History.
+
+Encryption has a real kill-switch (Settings → *End-to-end encryption*), verified peers can be
+forgotten, and there is nothing to switch off under **No telemetry** — MeshDrop has no server,
+no analytics and no crash reporting to send anything to.
+
+### 5. Permissions
 
 | Permission | Needed on | Why |
 | --- | --- | --- |
@@ -125,9 +185,10 @@ app/src/main/kotlin/com/meshdrop/
 ├── MeshDropApplication.kt       process entry point
 ├── di/                          AppContainer (graph) + MeshController (the API the UI uses)
 ├── core/
-│   ├── model/                   PeerDevice, TransferJob, IncomingRequest, …
-│   ├── prefs/                   local identity (random id + display name)
-│   └── util/                    formatting (pure Kotlin) + logging
+│   ├── model/                   PeerDevice, TransferJob, IncomingRequest, SecurityState,
+│   │                            TransferSessionState (the sealed state machine the UI renders)
+│   ├── prefs/                   local identity, encryption/verification/vault preferences
+│   └── util/                    formatting, smoothing + telemetry (pure Kotlin)
 ├── discovery/
 │   ├── api/                     DiscoveryStrategy + DiscoveryCoordinator  ← extension point
 │   ├── nsd/                     mDNS implementation
@@ -135,18 +196,22 @@ app/src/main/kotlin/com/meshdrop/
 │   ├── wifidirect/              stub + implementation notes
 │   └── bluetooth/               stub + implementation notes
 ├── transfer/
-│   ├── protocol/                Http.kt (framing) + TransferProtocol.kt (messages)
+│   ├── protocol/                Http.kt (framing) + TransferProtocol.kt (messages, v2)
 │   ├── server/                  TransferServer (receive side)
 │   ├── client/                  TransferClient (send side)
-│   └── TransferEngine.kt        application-scoped state: jobs, decisions, speed
-├── data/                        document reading, saving, spooling
+│   ├── crypto/                  DeviceIdentity, SessionNegotiator, SecureFrames, VerifiedPeers
+│   ├── state/                   TransferSessionState + the mapper from jobs to sessions
+│   └── TransferEngine.kt        application-scoped state: jobs, decisions, speed, keys
+├── data/                        document reading, saving, spooling, vault
 ├── net/                         local address / broadcast helpers
 ├── notifications/ + service/    channels, incoming-request notification, foreground service
 └── ui/
     ├── MeshDropRoot.kt          NavHost + permission gate
-    ├── home/ send/ receive/     three screens, each with a ViewModel
-    ├── components/              shared cards, rows, chips
-    └── theme/                   Material 3 theme (brand palette, Material You on 12+)
+    ├── home/ send/ receive/     the flow: hub, picker + progress, accept + download
+    ├── history/ settings/       day-grouped feed; security-first settings
+    ├── components/              motion (radar, lanes, assembly bar), Canvas graphs,
+    │                            trust indicator, swipe rows, transport icon set
+    └── theme/                   Material 3 theme — dark by default
 ```
 
 State that must survive rotation and navigation (the server, the job list, pending
@@ -178,9 +243,11 @@ Navigation 2.8.3 · Material 3. Dependencies are centralised in
 2. Grant nearby-device (or location, before Android 13) and notification permissions.
 3. On both: open MeshDrop. Each phone appears in the other's **Nearby devices** list within
    a few seconds.
-4. On the sender: **Send → Choose files → pick a device → Send**.
+4. On the sender: **Send → pick a device → choose files → Send**.
 5. On the receiver: **Accept** (either in the app or from the notification). Files land in
    **Downloads → MeshDrop**.
+6. Tap the trust line on either side and compare the six digits out loud. If they match, tap
+   **Codes match** — that device is *Verified* from then on and no longer needs comparing.
 
 `adb logcat -s MeshDrop:*` shows the whole conversation, including the HTTP requests the
 peer is making.
@@ -199,18 +266,24 @@ class WifiDirectDiscoveryStrategy(context: Context, scope: CoroutineScope) : Dis
 
 then register it in `AppContainer.discoveryStrategies`. `requestGroupInfo` gives you the
 group-owner address: run the **same** `TransferServer` on it and report the port through
-`LocalIdentity` — the coordinator, the engine, the protocol and all three screens are
+`LocalIdentity` — the coordinator, the engine, the protocol and every screen are
 unchanged. The same applies to Bluetooth (BLE advertising for discovery, RFCOMM only for
 the "let's set up a group" control message, files still over TCP).
 
 ## Known limitations of the MVP
 
-* **No encryption or pairing yet.** Any device on the LAN can offer you files, which is why
-  every transfer requires an explicit accept. TLS with a pinned/verified peer certificate
-  (or at least a SAS-style code comparison) is the natural next step.
-* **No resume.** A dropped transfer restarts from zero.
+* **Encryption without a PKI.** There is no certificate authority here: trust comes from humans
+  comparing six digits once. Skip the comparison and you are encrypted but technically open to
+  an active man-in-the-middle on the LAN — which is exactly why the UI says *Unverified* and
+  never shows a padlock until you do.
+* **No resume.** A dropped transfer restarts from zero; per-chunk Merkle verification (so a
+  partial transfer could be resumed and re-checked) is the natural next step after integrity
+  is already per-chunk.
 * Single batch at a time per peer; concurrent senders queue on the server's accept loop.
-* Transfer history lives in memory for the session (it is not persisted across restarts).
+* Swarm splitting and relay routing are modelled (`PeerContribution`, lane failover, route
+  topology) but not yet driven by the transport — the UI is ready, the scheduler is not.
+* The transfer log that History renders lives in memory for the session; vaulted files,
+  verified peers and preferences are persisted.
 * Cancelling a *receiving* transfer stops new files; the file already in flight finishes.
 
 ## Why Compose + coroutines + zero network dependencies

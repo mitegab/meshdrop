@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.VideoFile
+import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -128,7 +129,7 @@ fun SendScreen(
                 SectionLabel("Send to")
                 if (peers.isEmpty()) {
                     EmptyState(
-                        icon = Icons.Default.Close,
+                        icon = Icons.Default.WifiOff,
                         title = "No devices nearby",
                         subtitle = "Open MeshDrop on the other phone and it will appear here.",
                     )
