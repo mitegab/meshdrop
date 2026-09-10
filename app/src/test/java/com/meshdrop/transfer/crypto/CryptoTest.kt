@@ -5,6 +5,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -50,8 +51,9 @@ class CryptoTest {
         val plaintext = 200_000L
         val ciphertext = SecureFrames.ciphertextLength(plaintext)
 
-        // 4 chunks: 3 x 64 KB + 1 remainder, each with a 32 byte frame header + 16 byte tag.
-        assertEquals(4L * 32L + 16L * 4L + plaintext, ciphertext)
+        // 4 chunks: 3 x 64 KB + 1 remainder, each with a 32 byte header
+        // (4 length + 12 nonce) that is followed by a 16 byte GCM tag.
+        assertEquals(4L * (SecureFrames.LENGTH_BYTES + SecureFrames.NONCE_BYTES + SecureFrames.TAG_BYTES) + plaintext, ciphertext)
         assertEquals(plaintext, SecureFrames.plaintextLength(ciphertext))
     }
 
@@ -137,12 +139,15 @@ class CryptoTest {
     fun `a forged signature is detected`() {
         val alice = SessionNegotiator(InMemoryIdentity(), InMemoryTrustedPeers())
         val offer = alice.createOffer()
-        val forged = offer.material.copy(signature = ByteArray(offer.material.signature.size))
+        // A signature that is well formed but wrong: flip the last byte of a real one.
+        val mangled = offer.material.signature.copyOf()
+        mangled[mangled.lastIndex] = (mangled[mangled.lastIndex] + 1).toByte()
+        val forged = offer.material.copy(signature = mangled)
 
         val keys = alice.establish(EndpointRole.SENDER, alice.createOffer(), forged)
-        assertTrue("encryption still happens, but the peer is not authenticated", keys != null)
-        assertFalse(keys!!.signatureValid)
-        assertFalse(keys.peerRemembered)
+        assertNotNull("encryption still happens, but the peer is not authenticated", keys)
+        assertFalse("a wrong signature must not count as authentication", keys!!.signatureValid)
+        assertFalse("an unauthenticated peer is never remembered", keys.peerRemembered)
     }
 
     @Test

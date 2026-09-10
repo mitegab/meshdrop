@@ -87,8 +87,15 @@ jobs:
             echo "### testDebugUnitTest failed"
             echo '```'
             grep -E "^(e:|w:|FAILURE:|.*FAILED|.*What went wrong|\* )" test.log | head -60
+            # Gradle only prints the test *name*; the assertion itself lives in the XML.
+            echo "---- assertion details ----"
+            for report in app/build/test-results/testDebugUnitTest/*.xml; do
+              [ -f "$report" ] || continue
+              echo "-- $(basename "$report")"
+              tr '<' '\n<' < "$report" | grep -E '^(testcase|failure)' | head -40
+            done
             echo "---- last lines ----"
-            tail -30 test.log
+            tail -20 test.log
             echo '```'
           } > comment.md
           gh api --method POST "/repos/$GH_REPO/commits/${{ github.sha }}/comments" \
