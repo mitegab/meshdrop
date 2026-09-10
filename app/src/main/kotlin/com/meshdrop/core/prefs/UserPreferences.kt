@@ -73,6 +73,27 @@ class UserPreferences(context: Context) {
         _vaultLock.value = enabled
     }
 
+    /**
+     * Transfers whose files live in the vault rather than in shared storage.
+     *
+     * Kept here (not derived from the directory) so a vault entry survives a job being
+     * cleared from the engine's in-memory list.
+     */
+    private val _vaultedJobs = MutableStateFlow(prefs.getStringSet(KEY_VAULT, emptySet()) ?: emptySet())
+    val vaultedJobs: StateFlow<Set<String>> = _vaultedJobs.asStateFlow()
+
+    fun markVaulted(jobId: String) {
+        val updated = _vaultedJobs.value + jobId
+        prefs.edit { putStringSet(KEY_VAULT, updated) }
+        _vaultedJobs.value = updated
+    }
+
+    fun unmarkVaulted(jobId: String) {
+        val updated = _vaultedJobs.value - jobId
+        prefs.edit { putStringSet(KEY_VAULT, updated) }
+        _vaultedJobs.value = updated
+    }
+
     fun setDeviceName(rawName: String) {
         val cleaned = rawName
             .trim()
@@ -97,6 +118,7 @@ class UserPreferences(context: Context) {
         const val KEY_REQUIRE_VERIFICATION = "require_verification"
         const val KEY_AUTO_ACCEPT = "auto_accept_verified"
         const val KEY_VAULT_LOCK = "vault_lock"
+        const val KEY_VAULT = "vaulted_jobs"
         const val MAX_NAME_LENGTH = 32
     }
 }

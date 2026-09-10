@@ -25,7 +25,12 @@ class MeshDropViewModelFactory(
         HomeViewModel::class.java -> HomeViewModel(container.meshController) as T
         SendViewModel::class.java -> SendViewModel(container.meshController, container.documentRepository) as T
         ReceiveViewModel::class.java -> ReceiveViewModel(container.meshController) as T
-        HistoryViewModel::class.java -> HistoryViewModel(container.application, container.meshController) as T
+        HistoryViewModel::class.java -> HistoryViewModel(
+            container.application,
+            container.meshController,
+            container.vaultStore,
+            container.userPreferences,
+        ) as T
         SettingsViewModel::class.java -> SettingsViewModel(
             container.userPreferences,
             container.meshController,

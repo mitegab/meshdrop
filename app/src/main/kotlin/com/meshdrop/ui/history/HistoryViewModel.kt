@@ -8,7 +8,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.meshdrop.core.model.SecurityState
 import com.meshdrop.core.model.TransferJob
+import com.meshdrop.core.prefs.UserPreferences
 import com.meshdrop.core.util.MeshLog
+import com.meshdrop.data.VaultStore
 import com.meshdrop.di.MeshController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -42,6 +44,8 @@ data class HistoryUiState(
 class HistoryViewModel(
     application: Application,
     private val controller: MeshController,
+    private val vault: VaultStore,
+    private val preferences: UserPreferences,
 ) : AndroidViewModel(application) {
 
     private val _uiState = MutableStateFlow(HistoryUiState())
@@ -62,6 +66,12 @@ class HistoryViewModel(
     fun securityFor(jobId: String): SecurityState = controller.security.value[jobId] ?: SecurityState.UNKNOWN
 
     fun delete(job: TransferJob) {
+        if (preferences.vaultedJobs.value.contains(job.id)) {
+            vault.delete(job.id)
+            preferences.unmarkVaulted(job.id)
+            _uiState.update { it.copy(message = "Deleted from the vault") }
+            return
+        }
         viewModelScope.launch {
             val deleted = withContext(Dispatchers.IO) { deleteLocal(job) }
             controller.clearFinished()
@@ -74,6 +84,30 @@ class HistoryViewModel(
     }
 
     fun clearAll() = controller.clearFinished()
+
+    /** Jobs whose files are in the vault rather than in shared storage. */
+    val vaultedJobs: StateFlow<Set<String>> = preferences.vaultedJobs
+
+    /**
+     * Moves a received transfer's files into the vault.
+     *
+     * Callers gate this behind the device lock: the copy itself is not secret, but the vault
+     * should never be a place a file arrives at by accident.
+     */
+    fun moveToVault(job: TransferJob) {
+        viewModelScope.launch {
+            val moved = withContext(Dispatchers.IO) { vault.moveIn(job) }
+            if (moved) {
+                preferences.markVaulted(job.id)
+                _uiState.update { it.copy(message = "Moved into the vault") }
+            } else {
+                _uiState.update { it.copy(message = "Those files are no longer on disk") }
+            }
+        }
+    }
+
+    /** Shareable Uri for a vaulted file, so Open and Re-share still work from in there. */
+    fun vaultUri(jobId: String): Uri? = vault.filesFor(jobId).firstOrNull()?.let(vault::contentUri)
 
     fun consumeMessage() = _uiState.update { it.copy(message = null) }
 
@@ -109,10 +143,12 @@ class HistoryViewModel(
         fun factory(
             application: Application,
             controller: MeshController,
+            vault: VaultStore,
+            preferences: UserPreferences,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                HistoryViewModel(application, controller) as T
+                HistoryViewModel(application, controller, vault, preferences) as T
         }
     }
 }

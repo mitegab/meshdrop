@@ -55,7 +55,7 @@ private val LightColors = lightColorScheme(
 /** Shared typography scale for both colour schemes. */
 val AppTypography = Typography()
 
-$/**
+/**
  * MeshDrop is dark-first.
  *
  * This is a systems tool: the screens are dominated by a live network graph, throughput

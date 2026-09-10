@@ -3,6 +3,7 @@ package com.meshdrop.di
 import android.app.Application
 import com.meshdrop.core.prefs.UserPreferences
 import com.meshdrop.data.DocumentRepository
+import com.meshdrop.data.VaultStore
 import com.meshdrop.data.FileSpooler
 import com.meshdrop.data.ReceivedFileStore
 import com.meshdrop.discovery.api.DiscoveryCoordinator
@@ -38,6 +39,9 @@ class AppContainer(val application: Application) {
     /** Long-term device identity used to authenticate peers (Android Keystore). */
     val deviceIdentity: DeviceIdentity = DeviceIdentity.create(application)
     val verifiedPeers = VerifiedPeers(application)
+
+    /** Private storage for files the user moved out of shared storage. */
+    val vaultStore = VaultStore(application)
 
     val transferEngine = TransferEngine(
         scope = applicationScope,

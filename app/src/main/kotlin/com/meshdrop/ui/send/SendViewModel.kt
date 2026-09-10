@@ -129,7 +129,7 @@ class SendViewModel(
                                 status = job.status,
                                 message = job.message,
                                 fileCount = job.files.size,
-                                integrityConfirmed = job.integrityConfirmed,
+                                integrityConfirmed = controller.security.value[job.id]?.integrityConfirmed ?: false,
                             ),
                         )
                     }

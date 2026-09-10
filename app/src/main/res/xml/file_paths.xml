@@ -10,4 +10,7 @@
     <files-path
         name="received"
         path="MeshDrop" />
+    <files-path
+        name="vault"
+        path="vault" />
 </paths>

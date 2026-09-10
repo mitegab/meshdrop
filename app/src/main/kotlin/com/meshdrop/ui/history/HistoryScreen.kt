@@ -1,7 +1,12 @@
 package com.meshdrop.ui.history
 
+import android.app.Activity
+import android.app.KeyguardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -35,7 +41,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,7 +61,6 @@ import com.meshdrop.ui.components.StatusChip
 import com.meshdrop.ui.components.SwipeAction
 import com.meshdrop.ui.components.SwipeRow
 import com.meshdrop.ui.components.TrustBadge
-import com.meshdrop.ui.components.deviceColor
 
 /**
  * History — a day-grouped feed of what moved, with where it came from.
@@ -70,8 +77,33 @@ fun HistoryScreen(
 ) {
     val groups by viewModel.groups.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val vaulted by viewModel.vaultedJobs.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+
+    // Anything that touches the vault goes through the device lock first.
+    var guardedAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val unlockLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) guardedAction?.invoke()
+        guardedAction = null
+    }
+
+    fun requireUnlock(action: () -> Unit) {
+        val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val intent = keyguard?.createConfirmDeviceCredentialIntent(
+            "Unlock the vault",
+            "Confirm your device lock to use files in MeshDrop's vault",
+        )
+        if (intent != null) {
+            guardedAction = action
+            unlockLauncher.launch(intent)
+        } else {
+            // No lock screen set up: the vault is still private storage, so carry on.
+            action()
+        }
+    }
 
     LaunchedEffect(uiState.message) {
         uiState.message?.let {
@@ -140,27 +172,20 @@ fun HistoryScreen(
                     HistoryRow(
                         job = job,
                         security = security,
+                        uri = if (job.id in vaulted) {
+                            viewModel.vaultUri(job.id)
+                        } else {
+                            job.files.firstNotNullOfOrNull { it.localUri }?.let(Uri::parse)
+                        },
                         onOpen = { uri ->
-                            runCatching {
-                                context.startActivity(
-                                    Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                                )
-                            }
+                            if (job.id in vaulted) requireUnlock { openFile(context, uri) } else openFile(context, uri)
                         },
                         onShare = { uri ->
-                            runCatching {
-                                context.startActivity(
-                                    Intent.createChooser(
-                                        Intent(Intent.ACTION_SEND).apply {
-                                            type = "*/*"
-                                            putExtra(Intent.EXTRA_STREAM, uri)
-                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                        },
-                                        "Re-share",
-                                    ),
-                                )
-                            }
+                            if (job.id in vaulted) requireUnlock { shareFile(context, uri) } else shareFile(context, uri)
                         },
+                        vaulted = job.id in vaulted,
+                        onVault = { requireUnlock { viewModel.moveToVault(job) } },
+
                         onDelete = { viewModel.delete(job) },
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
@@ -175,15 +200,16 @@ fun HistoryScreen(
 @Composable
 private fun HistoryRow(
     job: TransferJob,
+    uri: Uri?,
     security: com.meshdrop.core.model.SecurityState,
+    vaulted: Boolean,
     onOpen: (Uri) -> Unit,
     onShare: (Uri) -> Unit,
+    onVault: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val color = deviceColor(job.peerId.ifBlank { job.peerName })
     val received = job.direction == TransferDirection.RECEIVE
-    val firstUri = job.files.firstNotNullOfOrNull { it.localUri }?.let(Uri::parse)
 
     SwipeRow(
         modifier = modifier.height(84.dp),
@@ -192,7 +218,13 @@ private fun HistoryRow(
                 icon = Icons.Default.Share,
                 label = "Re-share",
                 tint = MaterialTheme.colorScheme.primary,
-                onClick = { firstUri?.let(onShare) },
+                onClick = { uri?.let(onShare) },
+            ),
+            SwipeAction(
+                icon = Icons.Default.Lock,
+                label = if (vaulted) "In vault" else "Move to vault",
+                tint = MaterialTheme.colorScheme.secondary,
+                onClick = onVault,
             ),
             SwipeAction(
                 icon = Icons.Default.Delete,
@@ -206,13 +238,13 @@ private fun HistoryRow(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.surface)
-                .clickable(enabled = firstUri != null) { firstUri?.let(onOpen) }
+                .clickable(enabled = uri != null) { uri?.let(onOpen) }
                 .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(contentAlignment = Alignment.Center) {
                 FileThumb(
-                    uri = firstUri,
+                    uri = uri,
                     mimeType = job.files.firstOrNull()?.mimeType,
                     modifier = Modifier.size(48.dp),
                 )
@@ -261,6 +293,19 @@ private fun HistoryRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    if (vaulted) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "In the vault",
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(12.dp),
+                        )
+                        Text(
+                            text = "in vault",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary,
+                        )
+                    }
                     TrustBadge(security = security)
                     if (security.integrityConfirmed) {
                         Icon(
@@ -287,5 +332,28 @@ private fun HistoryRow(
                 StatusChip(status = job.status)
             }
         }
+    }
+}
+
+private fun openFile(context: android.content.Context, uri: Uri) {
+    runCatching {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+        )
+    }
+}
+
+private fun shareFile(context: android.content.Context, uri: Uri) {
+    runCatching {
+        context.startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                },
+                "Re-share",
+            ),
+        )
     }
 }

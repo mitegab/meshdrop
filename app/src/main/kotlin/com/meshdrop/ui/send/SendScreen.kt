@@ -55,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meshdrop.core.model.PeerDevice
+import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.util.Format
 import com.meshdrop.transfer.state.TransferSessionState
 import com.meshdrop.ui.components.ActiveTransferPanel
@@ -86,7 +87,7 @@ fun SendScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     val picker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocument(),
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris -> viewModel.onFilesPicked(uris) }
 
     LaunchedEffect(autoOpenPicker) {
@@ -98,7 +99,7 @@ fun SendScreen(
     LaunchedEffect(uiState.error) {
         uiState.error?.let {
             snackbarHostState.showSnackbar(it)
-            viewModel.clearError()
+            viewModel.consumeError()
         }
     }
 
