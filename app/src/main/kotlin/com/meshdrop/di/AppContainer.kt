@@ -12,6 +12,8 @@ import com.meshdrop.discovery.nsd.NsdDiscoveryStrategy
 import com.meshdrop.discovery.udp.UdpBeaconDiscoveryStrategy
 import com.meshdrop.discovery.wifidirect.WifiDirectDiscoveryStrategy
 import com.meshdrop.transfer.TransferEngine
+import com.meshdrop.transfer.crypto.DeviceIdentity
+import com.meshdrop.transfer.crypto.VerifiedPeers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,11 +35,17 @@ class AppContainer(private val application: Application) {
     val fileSpooler = FileSpooler(application)
     val receivedFileStore = ReceivedFileStore(application)
 
+    /** Long-term device identity used to authenticate peers (Android Keystore). */
+    val deviceIdentity: DeviceIdentity = DeviceIdentity.create(application)
+    val verifiedPeers = VerifiedPeers(application)
+
     val transferEngine = TransferEngine(
         scope = applicationScope,
         documentRepository = documentRepository,
         fileSpooler = fileSpooler,
         fileStore = receivedFileStore,
+        identity = deviceIdentity,
+        trustedPeers = verifiedPeers,
         localDeviceId = userPreferences.deviceId,
         localDeviceName = { userPreferences.deviceName.value },
     )

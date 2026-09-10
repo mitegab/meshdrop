@@ -6,6 +6,10 @@ import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.util.MeshLog
 import com.meshdrop.data.DocumentRepository
 import com.meshdrop.data.FileSpooler
+import com.meshdrop.transfer.crypto.SecureFrames
+import com.meshdrop.transfer.crypto.TransferCrypto
+import com.meshdrop.transfer.crypto.toDto
+import com.meshdrop.transfer.crypto.toOffer
 import com.meshdrop.transfer.protocol.ControlMessages
 import com.meshdrop.transfer.protocol.FileMeta
 import com.meshdrop.transfer.protocol.HandshakeRequest
@@ -68,6 +72,7 @@ class TransferClient(
         senderId: String,
         senderName: String,
         files: List<TransferFile>,
+        crypto: TransferCrypto? = null,
         isCancelled: () -> Boolean = { false },
         onFileStarted: (fileId: String) -> Unit = {},
         onFileProgress: (fileId: String, bytesSent: Long, sizeBytes: Long, bytesPerSecond: Long) -> Unit = { _, _, _, _ -> },
@@ -78,7 +83,9 @@ class TransferClient(
             return SendOutcome(false, "That device has no reachable address yet", emptyList())
         }
 
-        val handshake = runCatching { requestHandshake(peer, batchId, senderId, senderName, files) }
+        val handshake = runCatching {
+            requestHandshake(peer, batchId, senderId, senderName, files, crypto)
+        }
             .getOrElse { error ->
                 MeshLog.w(TAG, "Handshake with ${peer.name} failed", error)
                 return SendOutcome(false, readable(error), emptyList())
@@ -95,7 +102,7 @@ class TransferClient(
             onFileStarted(file.id)
 
             val outcome = runCatching {
-                uploadFile(peer, batchId, file, isCancelled, onFileProgress)
+                uploadFile(peer, batchId, file, crypto, isCancelled, onFileProgress)
             }.getOrElse { error ->
                 MeshLog.w(TAG, "Upload of ${file.name} failed", error)
                 FileOutcome(file.id, false, 0L, readable(error))
@@ -124,12 +131,14 @@ class TransferClient(
         senderId: String,
         senderName: String,
         files: List<TransferFile>,
+        crypto: TransferCrypto?,
     ): SendOutcome {
         val request = HandshakeRequest(
             batchId = batchId,
             senderId = senderId,
             senderName = senderName,
             files = files.map { FileMeta(it.id, it.name, it.sizeBytes, it.mimeType) },
+            security = crypto?.localMaterial()?.toDto(),
         )
         val body = with(ControlMessages) { request.toJson() }.toByteArray(StandardCharsets.UTF_8)
 
@@ -144,6 +153,10 @@ class TransferClient(
             )
             val response = BufferedInputStream(it.getInputStream()).readResponse()
             val parsed = ControlMessages.parseHandshakeResponse(response.bodyText())
+            if (parsed?.accepted == true) {
+                // Establishes the shared secret; null means this transfer stays plaintext.
+                crypto?.establish(parsed.security?.toOffer())
+            }
             return when {
                 response.isSuccessful && parsed?.accepted == true -> SendOutcome(true, null, emptyList())
                 response.status == 403 -> SendOutcome(false, parsed?.message ?: "The receiver declined", emptyList())
@@ -163,6 +176,7 @@ class TransferClient(
         peer: PeerDevice,
         batchId: String,
         file: TransferFile,
+        crypto: TransferCrypto?,
         isCancelled: () -> Boolean,
         onFileProgress: (fileId: String, bytesSent: Long, sizeBytes: Long, bytesPerSecond: Long) -> Unit,
     ): FileOutcome {
@@ -171,50 +185,72 @@ class TransferClient(
         val (stream, sizeBytes) = opened
         val socket = connect(peer)
 
+        val sessionKeys = crypto?.sessionKeys()
+        val wireLength = if (sessionKeys != null) SecureFrames.ciphertextLength(sizeBytes) else sizeBytes
+
         return socket.use outer@{ connection ->
             connection.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
             val output = connection.getOutputStream()
             output.writeRequestHead(
                 method = "PUT",
                 path = TransferProtocol.uploadPath(batchId, file.id),
-                contentLength = sizeBytes,
-                headers = mapOf(
-                    TransferProtocol.HEADER_FILE_NAME to URLEncoder.encode(file.name, "UTF-8"),
-                    TransferProtocol.HEADER_BATCH_ID to batchId,
-                    "Content-Type" to (file.mimeType ?: Http.CONTENT_TYPE_OCTET),
-                ),
+                contentLength = wireLength,
+                headers = buildMap {
+                    put(TransferProtocol.HEADER_FILE_NAME, URLEncoder.encode(file.name, "UTF-8"))
+                    put(TransferProtocol.HEADER_BATCH_ID, batchId)
+                    put("Content-Type", file.mimeType ?: Http.CONTENT_TYPE_OCTET)
+                    if (sessionKeys != null) {
+                        put(TransferProtocol.HEADER_ENCRYPTION, sessionKeys.cipherSuite)
+                    }
+                },
             )
 
             var sent = 0L
             var cancelled = false
-            var windowBytes = 0L
-            var windowStart = System.currentTimeMillis()
-            var lastReport = 0L
+
+            // One place measures the rate, whichever path below is moving the bytes, so the
+            // UI sees the same numbers for encrypted and plaintext transfers.
+            var lastReportAt = System.currentTimeMillis()
+            var lastReportBytes = 0L
             var bytesPerSecond = 0L
+
+            fun report(sentNow: Long) {
+                val now = System.currentTimeMillis()
+                val elapsed = now - lastReportAt
+                if (elapsed < PROGRESS_REPORT_MS) return
+                val delta = sentNow - lastReportBytes
+                val instant = (delta * 1000L) / elapsed
+                bytesPerSecond = if (bytesPerSecond == 0L) instant else (bytesPerSecond / 2) + (instant / 2)
+                lastReportAt = now
+                lastReportBytes = sentNow
+                onFileProgress(file.id, sentNow, sizeBytes, bytesPerSecond)
+            }
 
             stream.use inner@{ input ->
                 val buffered =
                     input as? BufferedInputStream ?: BufferedInputStream(input, TransferProtocol.CHUNK_BYTES)
-                val buffer = ByteArray(TransferProtocol.CHUNK_BYTES)
-                while (!cancelled) {
-                    val read = buffered.read(buffer)
-                    if (read == -1) break
-                    output.write(buffer, 0, read)
-                    sent += read
-                    windowBytes += read
-
-                    val now = System.currentTimeMillis()
-                    val elapsed = now - windowStart
-                    if (elapsed >= SPEED_WINDOW_MS) {
-                        bytesPerSecond = (windowBytes * 1000L) / elapsed
-                        windowBytes = 0L
-                        windowStart = now
+                if (sessionKeys != null) {
+                    SecureFrames.encryptStream(
+                        key = sessionKeys.sendKey,
+                        salt = sessionKeys.nonceSalt,
+                        source = buffered,
+                        plaintextLength = sizeBytes,
+                        sink = output,
+                    ) { plaintextBytes ->
+                        sent = plaintextBytes
+                        report(sent)
+                        if (isCancelled()) cancelled = true
                     }
-                    if (now - lastReport >= PROGRESS_REPORT_MS) {
-                        lastReport = now
-                        onFileProgress(file.id, sent, sizeBytes, bytesPerSecond)
+                } else {
+                    val buffer = ByteArray(TransferProtocol.CHUNK_BYTES)
+                    while (!cancelled) {
+                        val read = buffered.read(buffer)
+                        if (read == -1) break
+                        output.write(buffer, 0, read)
+                        sent += read
+                        report(sent)
+                        if (isCancelled()) cancelled = true
                     }
-                    if (isCancelled()) cancelled = true
                 }
                 output.flush()
             }
@@ -313,7 +349,6 @@ class TransferClient(
 
     companion object {
         const val TAG = "TransferClient"
-        private const val SPEED_WINDOW_MS = 700L
         private const val PROGRESS_REPORT_MS = 120L
     }
 }

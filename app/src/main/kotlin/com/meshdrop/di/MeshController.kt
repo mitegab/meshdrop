@@ -33,6 +33,7 @@ class MeshController(
     val strategyStatuses = discovery.strategyStatuses
     val jobs = engine.jobs
     val incoming: StateFlow<List<IncomingRequest>> = engine.incoming
+    val security: StateFlow<Map<String, com.meshdrop.core.model.SecurityState>> = engine.security
     val deviceName: StateFlow<String> = preferences.deviceName
 
     /**
@@ -107,6 +108,12 @@ class MeshController(
     suspend fun send(peer: PeerDevice, files: List<TransferFile>): String = engine.send(peer, files)
 
     fun approve(batchId: String) = engine.approve(batchId)
+
+    /** The user compared the safety codes on both devices and they matched. */
+    fun confirmSafetyCode(batchId: String, peerLabel: String) =
+        engine.confirmSafetyCode(batchId, peerLabel)
+
+    fun securityFor(batchId: String) = engine.securityFor(batchId)
 
     fun reject(batchId: String) = engine.reject(batchId)
 

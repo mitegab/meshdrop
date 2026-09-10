@@ -1,10 +1,13 @@
 package com.meshdrop.transfer
 
+import com.meshdrop.core.model.EndpointRole
+import com.meshdrop.core.model.EncryptionMode
 import com.meshdrop.core.model.IncomingRequest
 import com.meshdrop.core.model.PeerDevice
 import com.meshdrop.core.model.TransferDirection
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.model.TransferJob
+import com.meshdrop.core.model.SecurityState
 import com.meshdrop.core.model.TransferStatus
 import com.meshdrop.core.util.MeshLog
 import com.meshdrop.data.DocumentRepository
@@ -12,6 +15,12 @@ import com.meshdrop.data.FileSpooler
 import com.meshdrop.data.ReceivedFileStore
 import com.meshdrop.transfer.client.SendOutcome
 import com.meshdrop.transfer.client.TransferClient
+import com.meshdrop.transfer.crypto.BatchCrypto
+import com.meshdrop.transfer.crypto.DeviceIdentity
+import com.meshdrop.transfer.crypto.SecurityOffer
+import com.meshdrop.transfer.crypto.SessionKeys
+import com.meshdrop.transfer.crypto.SessionNegotiator
+import com.meshdrop.transfer.crypto.TrustedPeers
 import com.meshdrop.transfer.server.IncomingTransferHandler
 import com.meshdrop.transfer.server.TransferServer
 import kotlinx.coroutines.CompletableDeferred
@@ -42,12 +51,25 @@ class TransferEngine(
     documentRepository: DocumentRepository,
     fileSpooler: FileSpooler,
     fileStore: ReceivedFileStore,
+    identity: DeviceIdentity,
+    trustedPeers: TrustedPeers,
     private val localDeviceId: String,
     private val localDeviceName: () -> String,
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : IncomingTransferHandler {
 
     private val client = TransferClient(documentRepository, fileSpooler)
+
+    /** Ephemeral ECDH + AES-256-GCM sessions, one per batch. */
+    private val negotiator = SessionNegotiator(identity, trustedPeers)
+    private val batchCrypto = ConcurrentHashMap<String, BatchCrypto>()
+
+    private val _security = MutableStateFlow<Map<String, SecurityState>>(emptyMap())
+
+    /** Live security state per batch: what the trust indicator and the padlock render. */
+    val security: StateFlow<Map<String, SecurityState>> = _security.asStateFlow()
+
+    fun securityFor(batchId: String): SecurityState = _security.value[batchId] ?: SecurityState.UNKNOWN
 
     private val server = TransferServer(
         fileStore = fileStore,
@@ -107,6 +129,7 @@ class TransferEngine(
             startedAtMillis = now(),
         )
         _jobs.update { list -> list + job }
+        batchCrypto[jobId] = BatchCrypto(negotiator, EndpointRole.SENDER)
         MeshLog.i(TAG, "Queued send job $jobId (${job.totalBytes} bytes → ${peer.name})")
 
         scope.launch(Dispatchers.IO) { runSendJob(jobId, peer, files) }
@@ -123,6 +146,7 @@ class TransferEngine(
                 senderId = localDeviceId,
                 senderName = localDeviceName(),
                 files = files,
+                crypto = batchCrypto[jobId],
                 isCancelled = { jobId in cancelled },
                 onFileStarted = { fileId -> setFileStatus(jobId, fileId, TransferStatus.IN_PROGRESS) },
                 onFileProgress = { fileId, bytesSent, sizeBytes, bytesPerSecond ->
@@ -142,6 +166,8 @@ class TransferEngine(
             finishJob(jobId, TransferStatus.FAILED, error.message)
             return
         }
+
+        recordSecurity(jobId)
 
         when {
             !outcome.accepted -> finishJob(jobId, TransferStatus.REJECTED, outcome.message)
@@ -225,6 +251,31 @@ class TransferEngine(
         _incoming.update { list -> list.filterNot { it.batchId == batchId } }
     }
 
+    override fun negotiateKeys(batchId: String, peerMaterial: SecurityOffer?): SessionKeys? {
+        val crypto = batchCrypto.getOrPut(batchId) { BatchCrypto(negotiator, EndpointRole.RECEIVER) }
+        val keys = crypto.establish(peerMaterial)
+        recordSecurity(batchId)
+        MeshLog.i(TAG, "Batch $batchId: ${if (keys != null) "encrypted, code ${keys.safetyCode}" else "plaintext"}")
+        return keys
+    }
+
+    override fun localMaterialFor(batchId: String): SecurityOffer? =
+        batchCrypto[batchId]?.localMaterial()
+
+    override fun sessionKeyFor(batchId: String): ByteArray? =
+        batchCrypto[batchId]?.sessionKeys()?.receiveKey
+
+    /**
+     * The user compared the safety codes on both devices and they matched: remember this
+     * peer so every future transfer with it says "Verified" instead of "Unverified".
+     */
+    fun confirmSafetyCode(batchId: String, peerLabel: String) {
+        val keys = batchCrypto[batchId]?.sessionKeys() ?: return
+        negotiator.trustPeer(keys.peerFingerprint, peerLabel)
+        updateSecurity(batchId) { it.copy(codeCompared = true, peerRemembered = true) }
+        MeshLog.i(TAG, "User verified $peerLabel (${keys.peerFingerprint})")
+    }
+
     override fun onFileStarted(batchId: String, fileId: String) {
         setFileStatus(batchId, fileId, TransferStatus.IN_PROGRESS)
     }
@@ -253,6 +304,10 @@ class TransferEngine(
 
     override fun onFileCompleted(batchId: String, fileId: String, uri: String?) {
         setFileStatus(batchId, fileId, TransferStatus.COMPLETED, localUri = uri)
+        if (batchCrypto[batchId]?.sessionKeys() != null) {
+            // Every GCM tag checked out, otherwise decryptStream would have thrown.
+            updateSecurity(batchId) { it.copy(integrityConfirmed = true) }
+        }
         completeJobIfDone(batchId)
     }
 
@@ -275,10 +330,30 @@ class TransferEngine(
 
     /** Removes finished jobs from the visible list (they stay in memory for one session). */
     fun clearFinished() {
+        val activeIds = _jobs.value.filter { it.isActive }.map { it.id }.toSet()
         _jobs.update { list -> list.filter { it.isActive } }
+        _security.update { map -> map.filterKeys { it in activeIds } }
+        batchCrypto.keys.retainAll(activeIds)
     }
 
     fun job(jobId: String): TransferJob? = _jobs.value.firstOrNull { it.id == jobId }
+
+    /** Copies the agreed session into the UI-facing [SecurityState] for this batch. */
+    private fun recordSecurity(batchId: String) {
+        val keys = batchCrypto[batchId]?.sessionKeys()
+        updateSecurity(batchId) { current ->
+            current.copy(
+                mode = if (keys != null) EncryptionMode.E2E_AES_256_GCM else EncryptionMode.NONE,
+                safetyCode = keys?.safetyCode,
+                peerRemembered = keys?.peerRemembered ?: false,
+                peerFingerprint = keys?.peerFingerprint,
+            )
+        }
+    }
+
+    private fun updateSecurity(batchId: String, transform: (SecurityState) -> SecurityState) {
+        _security.update { map -> map + (batchId to transform(map[batchId] ?: SecurityState.UNKNOWN)) }
+    }
 
     private fun setFileStatus(
         jobId: String,

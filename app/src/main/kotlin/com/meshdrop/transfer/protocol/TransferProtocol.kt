@@ -1,5 +1,6 @@
 package com.meshdrop.transfer.protocol
 
+import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -18,8 +19,14 @@ import org.json.JSONObject
  */
 object TransferProtocol {
 
-    /** Bump together with [com.meshdrop.discovery.nsd.MeshDropService.PROTOCOL_VERSION]. */
-    const val VERSION = 1
+    /**
+     * Bump together with [com.meshdrop.discovery.nsd.MeshDropService.PROTOCOL_VERSION].
+     *
+     * v1: plaintext. v2: adds optional end-to-end encryption (ephemeral ECDH + AES-256-GCM
+     * frames). A v2 peer still talks plaintext to a v1 peer: both halves of the key exchange
+     * are optional, and the transfer only becomes encrypted when *both* sides offer keys.
+     */
+    const val VERSION = 2
 
     const val PATH_PING = "/meshdrop/ping"
     const val PATH_HANDSHAKE = "/meshdrop/handshake"
@@ -27,6 +34,8 @@ object TransferProtocol {
     const val PATH_COMPLETE = "/meshdrop/complete"
 
     const val HEADER_BATCH_ID = "X-MeshDrop-Batch"
+    /** Present on an encrypted upload: the only thing a passive observer learns. */
+    const val HEADER_ENCRYPTION = "X-MeshDrop-Enc"
     const val HEADER_FILE_ID = "X-MeshDrop-File"
     const val HEADER_FILE_NAME = "X-MeshDrop-Name"
     const val HEADER_SENDER_ID = "X-MeshDrop-Sender"
@@ -58,12 +67,25 @@ data class HandshakeRequest(
     val senderId: String,
     val senderName: String,
     val files: List<FileMeta>,
+    /** Our half of the key exchange; absent when this peer cannot (or will not) encrypt. */
+    val security: SecurityOffer? = null,
+)
+
+/** One side of the key exchange, base64 encoded for the JSON body. */
+data class SecurityOfferDto(
+    val scheme: String,
+    val ephemeralPublicKey: ByteArray,
+    val signature: ByteArray,
+    val identityPublicKey: ByteArray,
+    val fingerprint: String,
 )
 
 /** Reply to a handshake: the decision, plus an optional human readable reason. */
 data class HandshakeResponse(
     val decision: Decision,
     val message: String? = null,
+    /** The receiver's half of the key exchange, echoed back when it accepted and can encrypt. */
+    val security: SecurityOfferDto? = null,
 ) {
     enum class Decision { ACCEPTED, REJECTED, TIMEOUT, ERROR }
 
@@ -98,6 +120,12 @@ object ControlMessages {
     private const val K_ERROR = "error"
     private const val K_BYTES = "bytes"
     private const val K_DURATION = "durationMs"
+    private const val K_SECURITY = "security"
+    private const val K_SCHEME = "scheme"
+    private const val K_PUB = "pub"
+    private const val K_SIGNATURE = "sig"
+    private const val K_IDENTITY = "idpub"
+    private const val K_FINGERPRINT = "idfp"
     private const val K_DEVICE_ID = "deviceId"
     private const val K_PROTOCOL = "protocol"
 
@@ -113,11 +141,34 @@ object ControlMessages {
         .put(K_PROTOCOL, TransferProtocol.VERSION)
         .toString()
 
+    fun SecurityOfferDto.toJsonObject(): JSONObject = JSONObject()
+        .put(K_SCHEME, scheme)
+        .put(K_PUB, ephemeralPublicKey.base64())
+        .put(K_SIGNATURE, signature.base64())
+        .put(K_IDENTITY, identityPublicKey.base64())
+        .put(K_FINGERPRINT, fingerprint)
+
+    fun parseSecurityOffer(source: JSONObject?): SecurityOfferDto? = runCatching {
+        val json = source ?: return null
+        val scheme = json.optString(K_SCHEME)
+        if (scheme.isBlank()) return null
+        SecurityOfferDto(
+            scheme = scheme,
+            ephemeralPublicKey = json.optString(K_PUB).decodeBase64(),
+            signature = json.optString(K_SIGNATURE).decodeBase64(),
+            identityPublicKey = json.optString(K_IDENTITY).decodeBase64(),
+            fingerprint = json.optString(K_FINGERPRINT),
+        )
+    }.getOrNull()
+
     fun HandshakeRequest.toJson(): String = JSONObject()
         .put(K_VERSION, version)
         .put(K_BATCH, batchId)
         .put(K_SENDER_ID, senderId)
         .put(K_SENDER_NAME, senderName)
+        .apply {
+            security?.let { put(K_SECURITY, it.toJsonObject()) }
+        }
         .put(K_FILES, JSONArray().apply {
             files.forEach { file ->
                 put(
@@ -156,12 +207,14 @@ object ControlMessages {
             senderId = json.optString(K_SENDER_ID),
             senderName = json.optString(K_SENDER_NAME).ifBlank { "Unknown device" },
             files = files,
+            security = parseSecurityOffer(json.optJSONObject(K_SECURITY)),
         )
     }.getOrNull()
 
     fun HandshakeResponse.toJson(): String = JSONObject()
         .put(K_STATUS, decision.name.lowercase())
         .put(K_MESSAGE, message ?: "")
+        .apply { security?.let { put(K_SECURITY, it.toJsonObject()) } }
         .toString()
 
     fun parseHandshakeResponse(body: String): HandshakeResponse? = runCatching {
@@ -169,7 +222,11 @@ object ControlMessages {
         val decision = HandshakeResponse.Decision.entries
             .firstOrNull { it.name.equals(json.optString(K_STATUS), ignoreCase = true) }
             ?: HandshakeResponse.Decision.ERROR
-        HandshakeResponse(decision, json.optString(K_MESSAGE).takeIf { it.isNotBlank() })
+        HandshakeResponse(
+            decision = decision,
+            message = json.optString(K_MESSAGE).takeIf { it.isNotBlank() },
+            security = parseSecurityOffer(json.optJSONObject(K_SECURITY)),
+        )
     }.getOrNull()
 
     fun UploadAck.toJson(): String = JSONObject()
@@ -186,4 +243,8 @@ object ControlMessages {
             durationMillis = json.optLong(K_DURATION, 0L),
         )
     }.getOrNull()
+
+    private fun ByteArray.base64(): String = Base64.encodeToString(this, Base64.NO_WRAP)
+
+    private fun String.decodeBase64(): ByteArray = Base64.decode(this, Base64.DEFAULT)
 }

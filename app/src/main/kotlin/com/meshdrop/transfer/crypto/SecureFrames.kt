@@ -1,5 +1,7 @@
 package com.meshdrop.transfer.crypto
 
+import java.io.BufferedInputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -95,5 +97,98 @@ object SecureFrames {
             nonce[NONCE_BYTES - 1 - index] = (counter ushr (8 * index)).toByte()
         }
         return nonce
+    }
+
+    // region streaming ---------------------------------------------------------------------
+
+    /**
+     * Encrypts [plaintextLength] bytes read from [source] and writes the framed ciphertext to
+     * [sink], reporting progress in *plaintext* bytes so the UI shows the user's file size
+     * rather than the slightly larger encrypted size.
+     */
+    fun encryptStream(
+        key: ByteArray,
+        salt: ByteArray,
+        source: BufferedInputStream,
+        plaintextLength: Long,
+        sink: OutputStream,
+        chunkSize: Int = CHUNK_SIZE,
+        onProgress: (plaintextBytes: Long) -> Unit,
+    ): Long {
+        val buffer = ByteArray(chunkSize)
+        var remaining = plaintextLength
+        var counter = 0L
+        var written = 0L
+
+        while (remaining > 0L) {
+            val toRead = minOf(remaining, buffer.size.toLong()).toInt()
+            source.readFully(buffer, toRead)
+            val frame = encrypt(key, salt, counter, buffer, 0, toRead)
+            sink.write(frame)
+            remaining -= toRead
+            written += toRead
+            counter++
+            onProgress(written)
+        }
+        sink.flush()
+        return written
+    }
+
+    /**
+     * Reads [ciphertextLength] bytes of frames from [source], verifies every chunk's
+     * authentication tag, and writes the plaintext to [sink].
+     *
+     * Throws as soon as a tag fails — the transfer is aborted rather than silently delivering
+     * tampered bytes, and the failure is reported as a failed integrity check.
+     */
+    fun decryptStream(
+        key: ByteArray,
+        source: BufferedInputStream,
+        ciphertextLength: Long,
+        sink: OutputStream,
+        onProgress: (plaintextBytes: Long) -> Unit,
+    ): Long {
+        val header = ByteArray(LENGTH_BYTES + NONCE_BYTES)
+        var remaining = ciphertextLength
+        var written = 0L
+
+        while (remaining > 0L) {
+            source.readFully(header, header.size)
+            remaining -= header.size
+
+            val buffer = ByteBuffer.wrap(header)
+            val length = buffer.int
+            val nonce = ByteArray(NONCE_BYTES)
+            buffer.get(nonce)
+            if (length <= TAG_BYTES || length > remaining) {
+                throw javax.crypto.AEADBadTagException("Implausible frame length: $length")
+            }
+
+            val ciphertext = ByteArray(length)
+            source.readFully(ciphertext, length)
+            remaining -= length
+
+            val cipher = Cipher.getInstance(ALGORITHM)
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(TAG_BITS, nonce))
+            val plaintext = cipher.doFinal(ciphertext)
+
+            sink.write(plaintext)
+            written += plaintext.size
+            onProgress(written)
+        }
+        sink.flush()
+        return written
+    }
+
+    // endregion
+}
+
+/** Reads exactly [length] bytes, or throws if the stream ends early. */
+private fun BufferedInputStream.readFully(destination: ByteArray, length: Int) {
+    var offset = 0
+    while (offset < length) {
+        val read = read(destination, offset, length - offset)
+        if (read == -1) throw java.io.EOFException("Stream ended after $offset of $length bytes")
+        offset += read
     }
 }

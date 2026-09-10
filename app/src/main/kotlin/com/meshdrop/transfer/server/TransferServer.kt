@@ -5,6 +5,11 @@ import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.util.MeshLog
 import com.meshdrop.data.ReceivedFileSink
 import com.meshdrop.data.ReceivedFileStore
+import com.meshdrop.transfer.crypto.SecureFrames
+import com.meshdrop.transfer.crypto.SecurityOffer
+import com.meshdrop.transfer.crypto.SessionKeys
+import com.meshdrop.transfer.crypto.toDto
+import com.meshdrop.transfer.crypto.toOffer
 import com.meshdrop.transfer.protocol.ControlMessages
 import com.meshdrop.transfer.protocol.HandshakeResponse
 import com.meshdrop.transfer.protocol.Http
@@ -172,6 +177,10 @@ class TransferServer(
             totalBytes = files.sumOf { it.sizeBytes },
         )
 
+        // Keys are derived before the user decides, so the safety code can be shown
+        // alongside the "accept?" question rather than after it.
+        handler.negotiateKeys(request.batchId, request.security?.toOffer())
+
         // Long poll: the peer waits here until a human taps Accept or Reject.
         val accepted = withTimeoutOrNull(TransferProtocol.HANDSHAKE_TIMEOUT_MS.toLong()) {
             handler.requestApproval(incoming)
@@ -180,7 +189,7 @@ class TransferServer(
         when (accepted) {
             true -> {
                 batches[request.batchId] = BatchState(incoming)
-                output.writeJson(200, "OK", acceptedJson())
+                output.writeJson(200, "OK", acceptedJson(handler.localMaterialFor(request.batchId)?.toDto()))
             }
 
             false -> {
@@ -220,14 +229,42 @@ class TransferServer(
         val startedAt = System.currentTimeMillis()
         handler.onFileStarted(batchId, fileId)
 
+        val decryptionKey = handler.sessionKeyFor(batchId)
+        val expectedCiphertext = if (decryptionKey != null) {
+            SecureFrames.ciphertextLength(file.sizeBytes)
+        } else {
+            file.sizeBytes
+        }
+        if (expectedCiphertext > 0L && head.contentLength != expectedCiphertext) {
+            sink.abort()
+            val reason = "Size mismatch: got ${head.contentLength}, expected $expectedCiphertext"
+            handler.onFileFailed(batchId, fileId, reason)
+            output.writeError(400, "Bad Request", reason)
+            return
+        }
+
         val bytes = runCatching {
-            input.copyToWithProgress(sink.outputStream, head.contentLength) { copied ->
-                handler.onFileProgress(batchId, fileId, copied, file.sizeBytes)
+            if (decryptionKey != null) {
+                SecureFrames.decryptStream(
+                    key = decryptionKey,
+                    source = input,
+                    ciphertextLength = head.contentLength,
+                    sink = sink.outputStream,
+                ) { copied -> handler.onFileProgress(batchId, fileId, copied, file.sizeBytes) }
+            } else {
+                input.copyToWithProgress(sink.outputStream, head.contentLength) { copied ->
+                    handler.onFileProgress(batchId, fileId, copied, file.sizeBytes)
+                }
             }
         }.getOrElse { error ->
             sink.abort()
-            handler.onFileFailed(batchId, fileId, error.message ?: "write failed")
-            output.writeError(500, "Internal Server Error", error.message ?: "write failed")
+            val reason = if (decryptionKey != null && error is javax.crypto.AEADBadTagException) {
+                "Integrity check failed: the bytes were modified in transit"
+            } else {
+                error.message ?: "write failed"
+            }
+            handler.onFileFailed(batchId, fileId, reason)
+            output.writeError(500, "Internal Server Error", reason)
             return
         }
 
@@ -282,26 +319,29 @@ class TransferServer(
         private const val BACKLOG = 16
         private const val MAX_CONTROL_BYTES = 256 * 1024L
 
-        private fun acceptedJson(): String =
-            controlJson(HandshakeResponse.Decision.ACCEPTED, null)
+        private fun acceptedJson(security: com.meshdrop.transfer.protocol.SecurityOfferDto? = null): String =
+            controlJson(HandshakeResponse.Decision.ACCEPTED, null, security)
 
         private fun rejectedJson(): String =
             controlJson(
                 HandshakeResponse.Decision.REJECTED,
                 "The user declined the transfer",
+                null,
             )
 
         private fun timeoutJson(): String =
             controlJson(
                 HandshakeResponse.Decision.TIMEOUT,
                 "No answer within ${TransferProtocol.HANDSHAKE_TIMEOUT_MS / 1000}s",
+                null,
             )
 
         private fun controlJson(
             decision: HandshakeResponse.Decision,
             message: String?,
+            security: com.meshdrop.transfer.protocol.SecurityOfferDto?,
         ): String = with(ControlMessages) {
-            HandshakeResponse(decision, message).toJson()
+            HandshakeResponse(decision, message, security).toJson()
         }
 
         private fun uploadAckJson(ack: UploadAck): String = with(ControlMessages) { ack.toJson() }
