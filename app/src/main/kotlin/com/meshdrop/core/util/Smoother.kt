@@ -1,6 +1,7 @@
 package com.meshdrop.core.util
 
 import kotlin.math.abs
+import kotlin.math.roundToLong
 
 /**
  * Display smoothing.
@@ -20,13 +21,17 @@ object Smoothing {
     }
 
     /**
-     * Cuts the decimals off a rate so the text stops twitching:
-     * below 1 MB/s we keep one decimal, above it we keep whole megabytes.
+     * Snaps a rate onto a coarse ladder so the text stops twitching: below 100 KB/s in
+     * 5 KB/s steps, below 1 MB/s in 50 KB/s steps, above that in 250 KB/s steps.
+     *
+     * Rounded rather than floored: an EMA approaches the true rate from below and never
+     * quite reaches it, so truncating would leave the readout permanently one rung low
+     * (a steady 600 KB/s reading as 550 KB/s).
      */
     fun quantise(bytesPerSecond: Double): Double = when {
-        bytesPerSecond < 100_000.0 -> (bytesPerSecond / 5_000.0).toLong() * 5_000.0
-        bytesPerSecond < 1_000_000.0 -> (bytesPerSecond / 50_000.0).toLong() * 50_000.0
-        else -> (bytesPerSecond / 250_000.0).toLong() * 250_000.0
+        bytesPerSecond < 100_000.0 -> (bytesPerSecond / 5_000.0).roundToLong() * 5_000.0
+        bytesPerSecond < 1_000_000.0 -> (bytesPerSecond / 50_000.0).roundToLong() * 50_000.0
+        else -> (bytesPerSecond / 250_000.0).roundToLong() * 250_000.0
     }
 
     /**
