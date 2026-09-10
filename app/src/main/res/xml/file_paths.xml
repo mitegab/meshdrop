@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Paths FileProvider is allowed to share. Only used for files MeshDrop itself saved
+    (Downloads/MeshDrop on legacy devices, or the app's private folder as a fallback).
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-path
+        name="downloads"
+        path="Download/MeshDrop" />
+    <files-path
+        name="received"
+        path="MeshDrop" />
+    <files-path
+        name="vault"
+        path="vault" />
+</paths>

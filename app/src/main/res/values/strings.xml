@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MeshDrop</string>
+
+    <!-- Channel shown by the foreground service while a transfer is running -->
+    <string name="transfer_channel_name">File transfers</string>
+    <string name="transfer_channel_description">Progress for files MeshDrop is sending or receiving</string>
+    <string name="incoming_channel_name">Incoming files</string>
+    <string name="incoming_channel_description">Requests from nearby devices that want to send you files</string>
+
+    <!-- Notifications -->
+    <string name="notification_receiving_title">Waiting for files</string>
+    <string name="notification_receiving_text">MeshDrop is discoverable as %1$s</string>
+    <string name="notification_transfer_title">Transferring %1$d file(s)</string>
+    <string name="notification_transfer_text">%1$d%% · %2$s</string>
+    <string name="notification_action_accept">Accept</string>
+    <string name="notification_action_reject">Reject</string>
+    <string name="notification_incoming_title">%1$s wants to send you files</string>
+    <string name="notification_incoming_text">%1$d file(s) · %2$s</string>
+</resources>
