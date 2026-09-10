@@ -31,6 +31,48 @@ class UserPreferences(context: Context) {
         generated
     }
 
+    /**
+     * Master switch for end-to-end encryption.
+     *
+     * Off means we do not publish key material at all: the peer falls back to plaintext and
+     * says so on its trust line. It exists because the honest version of "we encrypt" is a
+     * switch the user controls, not a promise in a README.
+     */
+    private val _encryptionEnabled = MutableStateFlow(prefs.getBoolean(KEY_ENCRYPTION, true))
+    val encryptionEnabled: StateFlow<Boolean> = _encryptionEnabled.asStateFlow()
+
+    fun setEncryptionEnabled(enabled: Boolean) {
+        prefs.edit { putBoolean(KEY_ENCRYPTION, enabled) }
+        _encryptionEnabled.value = enabled
+    }
+
+    /** Ask for a safety-code comparison with every device we have never verified. */
+    private val _requireVerification = MutableStateFlow(prefs.getBoolean(KEY_REQUIRE_VERIFICATION, false))
+    val requireVerification: StateFlow<Boolean> = _requireVerification.asStateFlow()
+
+    fun setRequireVerification(required: Boolean) {
+        prefs.edit { putBoolean(KEY_REQUIRE_VERIFICATION, required) }
+        _requireVerification.value = required
+    }
+
+    /** Auto-accept incoming files from devices whose fingerprint we have verified. */
+    private val _autoAcceptVerified = MutableStateFlow(prefs.getBoolean(KEY_AUTO_ACCEPT, false))
+    val autoAcceptVerified: StateFlow<Boolean> = _autoAcceptVerified.asStateFlow()
+
+    fun setAutoAcceptVerified(enabled: Boolean) {
+        prefs.edit { putBoolean(KEY_AUTO_ACCEPT, enabled) }
+        _autoAcceptVerified.value = enabled
+    }
+
+    /** Gate MeshDrop behind the device lock screen (wired to the vault screen). */
+    private val _vaultLock = MutableStateFlow(prefs.getBoolean(KEY_VAULT_LOCK, false))
+    val vaultLock: StateFlow<Boolean> = _vaultLock.asStateFlow()
+
+    fun setVaultLock(enabled: Boolean) {
+        prefs.edit { putBoolean(KEY_VAULT_LOCK, enabled) }
+        _vaultLock.value = enabled
+    }
+
     fun setDeviceName(rawName: String) {
         val cleaned = rawName
             .trim()
@@ -51,6 +93,10 @@ class UserPreferences(context: Context) {
         const val PREFS_NAME = "meshdrop_identity"
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_DEVICE_NAME = "device_name"
+        const val KEY_ENCRYPTION = "encryption_enabled"
+        const val KEY_REQUIRE_VERIFICATION = "require_verification"
+        const val KEY_AUTO_ACCEPT = "auto_accept_verified"
+        const val KEY_VAULT_LOCK = "vault_lock"
         const val MAX_NAME_LENGTH = 32
     }
 }

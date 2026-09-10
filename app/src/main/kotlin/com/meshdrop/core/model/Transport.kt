@@ -12,6 +12,7 @@ enum class TransportLane(val label: String, val shortLabel: String) {
     WIFI_DIRECT("Wi-Fi Direct", "Wi-Fi Direct"),
     BLUETOOTH("Bluetooth", "Bluetooth"),
     RELAY("Relay hop", "Relay"),
+    USB("USB-C cable", "USB"),
     ;
 
     /** Rough ordering for "best lane first" display. */
@@ -20,6 +21,7 @@ enum class TransportLane(val label: String, val shortLabel: String) {
         WIFI_LAN -> 1
         RELAY -> 2
         BLUETOOTH -> 3
+        USB -> 4
     }
 }
 
@@ -63,3 +65,10 @@ data class PeerContribution(
 
 /** Which side of the conversation we are on. */
 enum class EndpointRole { SENDER, RECEIVER }
+
+/** Which lane a discovery transport normally carries bytes over. */
+fun DiscoveryKind.toLane(): TransportLane = when (this) {
+    DiscoveryKind.WIFI_DIRECT -> TransportLane.WIFI_DIRECT
+    DiscoveryKind.BLUETOOTH -> TransportLane.BLUETOOTH
+    DiscoveryKind.LAN_NSD, DiscoveryKind.LAN_BEACON -> TransportLane.WIFI_LAN
+}

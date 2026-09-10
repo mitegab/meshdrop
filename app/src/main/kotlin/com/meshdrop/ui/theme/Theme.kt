@@ -55,9 +55,17 @@ private val LightColors = lightColorScheme(
 /** Shared typography scale for both colour schemes. */
 val AppTypography = Typography()
 
+$/**
+ * MeshDrop is dark-first.
+ *
+ * This is a systems tool: the screens are dominated by a live network graph, throughput
+ * readouts and telemetry, and those read as noise on a white consumer-style background.
+ * Material You is still honoured on Android 12+, but the *default* (used whenever dynamic
+ * colour is off, including in previews and on older devices) is the midnight palette.
+ */
 @Composable
 fun MeshDropTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    darkTheme: Boolean = true,
     /** Material You is honoured on Android 12+, we fall back to the brand palette elsewhere. */
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit,

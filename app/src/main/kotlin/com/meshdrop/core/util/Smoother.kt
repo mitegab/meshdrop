@@ -70,3 +70,51 @@ class RateSmoother(
         value = to
     }
 }
+
+/**
+ * Everything an active-transfer screen needs that the raw job state does not give it:
+ * a non-flickering speed, a non-jittering ETA, and a history window for the graph.
+ *
+ * Pure Kotlin so the behaviour is unit tested without a device.
+ */
+class TransferTelemetry(
+    private val historyCapacity: Int = com.meshdrop.core.model.ThroughputHistory.DEFAULT_CAPACITY,
+) {
+
+    private val smoother = RateSmoother()
+    private val history = com.meshdrop.core.model.ThroughputHistory(historyCapacity)
+
+    @Volatile
+    private var stableEta: Long? = null
+
+    /**
+     * Feeds one progress sample and returns what should be *displayed*.
+     *
+     * @param bytesPerSecond raw measured rate
+     * @param etaMillis raw estimate, or null when unknown
+     */
+    fun update(bytesPerSecond: Long, etaMillis: Long?): SmoothedReading {
+        val smoothed = smoother.submit(bytesPerSecond.toDouble())
+        val quantised = Smoothing.quantise(smoothed)
+        history.add(quantised.toLong())
+        stableEta = Smoothing.stableEta(stableEta, etaMillis)
+        return SmoothedReading(bytesPerSecond = quantised.toLong(), etaMillis = stableEta)
+    }
+
+    /** Oldest → newest samples for the throughput graph. */
+    fun samples(): List<Long> = history.snapshot()
+
+    fun peak(): Long = history.peak()
+
+    fun reset() {
+        smoother.reset()
+        history.clear()
+        stableEta = null
+    }
+}
+
+/** What the UI should print right now. */
+data class SmoothedReading(
+    val bytesPerSecond: Long,
+    val etaMillis: Long?,
+)

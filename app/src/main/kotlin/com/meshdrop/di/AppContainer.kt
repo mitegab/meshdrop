@@ -25,7 +25,7 @@ import kotlinx.coroutines.SupervisorJob
  * keeps the "add a transport" story simple: [discoveryStrategies] is the only place a new
  * [DiscoveryStrategy] has to be registered.
  */
-class AppContainer(private val application: Application) {
+class AppContainer(val application: Application) {
 
     /** Application lifetime scope: survives configuration changes and navigation. */
     val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -48,6 +48,7 @@ class AppContainer(private val application: Application) {
         trustedPeers = verifiedPeers,
         localDeviceId = userPreferences.deviceId,
         localDeviceName = { userPreferences.deviceName.value },
+        encryptionEnabled = { userPreferences.encryptionEnabled.value },
     )
 
     /**

@@ -1,23 +1,24 @@
 package com.meshdrop.ui.receive
 
-import android.content.Intent
-import android.widget.Toast
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Downloading
-import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -26,10 +27,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -38,35 +39,37 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.meshdrop.core.model.IncomingRequest
-import com.meshdrop.core.model.TransferFile
-import com.meshdrop.core.model.TransferStatus
 import com.meshdrop.core.util.Format
-import com.meshdrop.net.LocalNetworkInfo
+import com.meshdrop.transfer.state.TransferSessionState
+import com.meshdrop.ui.components.ActiveTransferPanel
 import com.meshdrop.ui.components.EmptyState
-import com.meshdrop.ui.components.FileRow
-import com.meshdrop.ui.components.SectionLabel
-import com.meshdrop.ui.components.TransferJobCard
+import com.meshdrop.ui.components.FileThumb
+import com.meshdrop.ui.components.RadarPulse
+import com.meshdrop.ui.components.TransferFinishedCard
+import com.meshdrop.ui.components.TrustIndicator
+import com.meshdrop.ui.components.deviceColor
+import com.meshdrop.ui.components.deviceInitials
 
 /**
- * Screen 3 of 3 — stay visible, accept or reject what arrives, watch it land in Downloads.
+ * Screen 3 — stay visible, see what is coming, accept or decline, watch it land.
+ *
+ * The offer card is where the trust line earns its place: the safety code is shown *before*
+ * the user has to decide, because the keys are already derived by then.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReceiveScreen(
     viewModel: ReceiveViewModel,
-    onBack: () -> Unit,
+    onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
     val deviceName by viewModel.deviceName.collectAsStateWithLifecycle()
-    val incoming by viewModel.incoming.collectAsStateWithLifecycle()
-    val jobs by viewModel.activeJobs.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val sessions by viewModel.sessions.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(uiState.message) {
@@ -83,8 +86,8 @@ fun ReceiveScreen(
             TopAppBar(
                 title = { Text("Receive") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.Close, contentDescription = "Back")
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Default.Close, contentDescription = "Close")
                     }
                 },
             )
@@ -94,208 +97,185 @@ fun ReceiveScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                VisibilityCard(deviceName = deviceName, port = viewModel.transferPort)
+                VisibilityCard(
+                    deviceName = deviceName,
+                    visible = uiState.isWaiting,
+                    onToggle = viewModel::setWaiting,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                )
             }
 
-            if (incoming.isNotEmpty()) {
-                item { SectionLabel(text = "Incoming requests") }
-                items(items = incoming, key = { it.batchId }) { request ->
-                    IncomingRequestCard(
-                        request = request,
-                        onAccept = { viewModel.approve(request) },
-                        onReject = { viewModel.reject(request) },
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
-                    )
-                }
-            }
-
-            val active = jobs.filter { it.isActive }
-            if (active.isNotEmpty()) {
-                item { SectionLabel(text = "Receiving") }
-                items(items = active, key = { it.id }) { job ->
-                    TransferJobCard(
-                        job = job,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 5.dp),
-                        onCancel = { viewModel.cancel(job.id) },
-                    )
-                }
-            }
-
-            val finished = jobs.filter { it.status.isFinished }
-            if (incoming.isEmpty() && active.isEmpty() && finished.isEmpty()) {
+            if (sessions.isEmpty()) {
                 item {
                     EmptyState(
-                        icon = Icons.Default.Downloading,
+                        icon = Icons.Default.Download,
                         title = "Waiting for a transfer",
-                        subtitle = "Keep this screen open. When someone nearby sends you files, you will be asked to accept them.",
+                        subtitle = "Keep this screen open. Anyone nearby can send you a file, and you will be asked first.",
                     )
                 }
             }
 
-            if (finished.isNotEmpty()) {
-                item {
-                    SectionLabel(
-                        text = "Received",
-                        trailing = {
-                            Text(
-                                text = "Clear",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(start = 8.dp),
-                            )
-                        },
-                    )
-                }
-                items(items = finished.reversed(), key = { it.id }) { job ->
-                    ReceivedJobCard(
-                        job = job,
-                        onOpen = { file ->
-                            val uri = file.localUri
-                            if (uri.isNullOrBlank()) {
-                                Toast.makeText(context, "This file is not on this device", Toast.LENGTH_SHORT).show()
-                                return@ReceivedJobCard
-                            }
-                            val intent = Intent(Intent.ACTION_VIEW).apply {
-                                setDataAndType(android.net.Uri.parse(uri), file.mimeType ?: "*/*")
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            runCatching { context.startActivity(intent) }
-                                .onFailure {
-                                    Toast.makeText(context, "No app can open this file", Toast.LENGTH_SHORT).show()
-                                }
-                        },
-                    )
+            items(items = sessions, key = { it.batchIdOrNull ?: it::class.java.simpleName }) { session ->
+                when (session) {
+                    is TransferSessionState.IncomingOffer -> {
+                        OfferCard(
+                            state = session,
+                            trustExpanded = session.batchId in uiState.expandedTrust,
+                            onToggleTrust = { viewModel.toggleTrust(session.batchId) },
+                            onConfirmCode = {
+                                viewModel.confirmSafetyCode(session.batchId, session.peerName)
+                            },
+                            onAccept = { viewModel.approve(session.batchId) },
+                            onDecline = { viewModel.reject(session.batchId, session.peerName) },
+                            modifier = Modifier.padding(horizontal = 20.dp),
+                        )
+                    }
+
+                    is TransferSessionState.Active -> {
+                        ActiveTransferPanel(
+                            state = session,
+                            reading = viewModel.readingFor(session.batchId),
+                            advancedExpanded = session.batchId in uiState.expandedAdvanced,
+                            onToggleAdvanced = { viewModel.toggleAdvanced(session.batchId) },
+                            throughputSamples = viewModel.samplesFor(session.batchId),
+                            throughputPeak = viewModel.peakFor(session.batchId),
+                            onCancel = { viewModel.cancel(session.batchId) },
+                            modifier = Modifier.padding(horizontal = 20.dp),
+                        )
+                    }
+
+                    is TransferSessionState.Finished -> {
+                        TransferFinishedCard(
+                            state = session,
+                            onDone = viewModel::clearFinished,
+                            modifier = Modifier.padding(horizontal = 20.dp),
+                        )
+                    }
+
+                    else -> Unit
                 }
             }
 
-            item { Spacer(modifier = Modifier.size(24.dp)) }
+            item { Spacer(modifier = Modifier.height(24.dp)) }
         }
     }
 }
 
+/** Am I visible? The radar says yes; the switch says no. */
 @Composable
 private fun VisibilityCard(
     deviceName: String,
-    port: Int,
-    modifier: Modifier = Modifier,
-) {
-    val address = remember { LocalNetworkInfo.localIpAddress()?.hostAddress }
-    OutlinedCard(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(18.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Default.Download,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Visible as $deviceName",
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = if (port > 0) {
-                        "Listening on ${address ?: "this device"}:$port"
-                    } else {
-                        "Receiver is starting…"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun IncomingRequestCard(
-    request: IncomingRequest,
-    onAccept: () -> Unit,
-    onReject: () -> Unit,
+    visible: Boolean,
+    onToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = "${request.senderName} wants to send you files",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Text(
-                text = "${request.files.size} file(s) · ${Format.bytes(request.totalBytes)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
-            )
-            request.files.forEach { file ->
-                FileRow(
-                    file = file,
-                    modifier = Modifier.padding(vertical = 1.dp),
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(56.dp)) {
+                if (visible) {
+                    RadarPulse(modifier = Modifier.fillMaxSize())
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(14.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)),
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (visible) "Visible to nearby devices" else "Hidden",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    text = "As $deviceName",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = onAccept) {
-                    Icon(Icons.Default.Check, contentDescription = null)
-                    Spacer(modifier = Modifier.size(8.dp))
-                    Text("Accept")
-                }
-                OutlinedButton(onClick = onReject) {
-                    Icon(Icons.Default.Close, contentDescription = null)
-                    Spacer(modifier = Modifier.size(8.dp))
-                    Text("Reject")
-                }
-            }
+            Switch(checked = visible, onCheckedChange = onToggle)
         }
     }
 }
 
+/**
+ * The accept/decline card.
+ *
+ * Layering: sender → what they are sending → is this really them → decide. The trust line is
+ * collapsed to one row by default so the decision stays one tap.
+ */
 @Composable
-private fun ReceivedJobCard(
-    job: com.meshdrop.core.model.TransferJob,
-    onOpen: (TransferFile) -> Unit,
+private fun OfferCard(
+    state: TransferSessionState.IncomingOffer,
+    trustExpanded: Boolean,
+    onToggleTrust: () -> Unit,
+    onConfirmCode: () -> Unit,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val color = deviceColor(state.batchId)
     Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 5.dp),
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                text = "From ${job.peerName}",
-                style = MaterialTheme.typography.titleSmall,
-            )
-            job.files.forEach { file ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(color.copy(alpha = 0.22f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = deviceInitials(state.peerName),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = color,
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("${state.peerName} wants to send", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "${state.files.size} file(s) · ${Format.bytes(state.totalBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            state.files.take(4).forEach { file ->
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
+                    FileThumb(
+                        uri = file.localUri?.let { android.net.Uri.parse(it) },
+                        mimeType = file.mimeType,
+                        modifier = Modifier.size(36.dp),
+                    )
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = file.name,
@@ -304,22 +284,43 @@ private fun ReceivedJobCard(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = when (file.status) {
-                                TransferStatus.COMPLETED -> Format.bytes(file.sizeBytes)
-                                else -> file.status.name.lowercase().replaceFirstChar { it.uppercaseChar() }
-                            },
+                            text = Format.bytes(file.sizeBytes),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (file.status == TransferStatus.COMPLETED) {
-                        IconButton(onClick = { onOpen(file) }) {
-                            Icon(
-                                imageVector = Icons.Default.FolderOpen,
-                                contentDescription = "Open ${file.name}",
-                            )
-                        }
-                    }
+                }
+            }
+            if (state.files.size > 4) {
+                Text(
+                    text = "+${state.files.size - 4} more",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            TrustIndicator(
+                security = state.security,
+                peerName = state.peerName,
+                expanded = trustExpanded,
+                onToggleExpanded = onToggleTrust,
+                onConfirmCode = onConfirmCode,
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(
+                    onClick = onDecline,
+                    modifier = Modifier.weight(1f).height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                ) { Text("Decline") }
+                Button(
+                    onClick = onAccept,
+                    modifier = Modifier.weight(1f).height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Accept")
                 }
             }
         }

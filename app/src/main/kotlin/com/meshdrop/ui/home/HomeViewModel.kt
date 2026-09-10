@@ -3,6 +3,7 @@ package com.meshdrop.ui.home
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.meshdrop.core.model.PeerDevice
+import com.meshdrop.core.model.toLane
 import com.meshdrop.core.model.TransferJob
 import com.meshdrop.discovery.api.DiscoveryState
 import com.meshdrop.discovery.api.StrategyStatus
@@ -86,6 +87,14 @@ class HomeViewModel(
                 .onFailure { showMessage("Name changed, but re-advertising failed") }
         }
     }
+
+    /** Lanes discovery is currently using, for the radar card's "how am I looking" line. */
+    fun activeLanes(): List<com.meshdrop.core.model.TransportLane> = strategyStatuses.value
+        .filter { (_, status) -> status.scanning || status.advertising }
+        .keys
+        .map { it.toLane() }
+        .distinct()
+        .ifEmpty { listOf(com.meshdrop.core.model.TransportLane.WIFI_LAN) }
 
     /** Remembers the device the user tapped, so the Send screen can pre-select it. */
     fun selectPeer(peer: PeerDevice) = controller.selectPeer(peer)

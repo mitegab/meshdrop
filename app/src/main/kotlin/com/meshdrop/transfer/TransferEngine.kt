@@ -55,6 +55,8 @@ class TransferEngine(
     trustedPeers: TrustedPeers,
     private val localDeviceId: String,
     private val localDeviceName: () -> String,
+    /** Read live from settings: switching encryption off affects the next transfer. */
+    private val encryptionEnabled: () -> Boolean = { true },
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : IncomingTransferHandler {
 
@@ -129,7 +131,11 @@ class TransferEngine(
             startedAtMillis = now(),
         )
         _jobs.update { list -> list + job }
-        batchCrypto[jobId] = BatchCrypto(negotiator, EndpointRole.SENDER)
+        // No crypto object at all when encryption is switched off: the client then sends a
+        // handshake with no security block, and the peer shows "Not encrypted".
+        if (encryptionEnabled()) {
+            batchCrypto[jobId] = BatchCrypto(negotiator, EndpointRole.SENDER)
+        }
         MeshLog.i(TAG, "Queued send job $jobId (${job.totalBytes} bytes → ${peer.name})")
 
         scope.launch(Dispatchers.IO) { runSendJob(jobId, peer, files) }
@@ -252,6 +258,11 @@ class TransferEngine(
     }
 
     override fun negotiateKeys(batchId: String, peerMaterial: SecurityOffer?): SessionKeys? {
+        if (!encryptionEnabled()) {
+            MeshLog.i(TAG, "Batch $batchId: plaintext (encryption switched off in settings)")
+            recordSecurity(batchId)
+            return null
+        }
         val crypto = batchCrypto.getOrPut(batchId) { BatchCrypto(negotiator, EndpointRole.RECEIVER) }
         val keys = crypto.establish(peerMaterial)
         recordSecurity(batchId)
