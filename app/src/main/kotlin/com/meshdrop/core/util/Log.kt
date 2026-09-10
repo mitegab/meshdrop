@@ -27,12 +27,17 @@ object MeshLog {
     private fun log(priority: Int, tag: String, message: String, throwable: Throwable?) {
         if (!enabled) return
         val fullTag = if (tag.length > 20) "$PREFIX.${tag.take(20)}" else "$PREFIX.$tag"
-        when (priority) {
-            Log.VERBOSE -> Log.v(fullTag, message)
-            Log.DEBUG -> Log.d(fullTag, message)
-            Log.INFO -> Log.i(fullTag, message)
-            Log.WARN -> if (throwable != null) Log.w(fullTag, message, throwable) else Log.w(fullTag, message)
-            Log.ERROR -> if (throwable != null) Log.e(fullTag, message, throwable) else Log.e(fullTag, message)
+        // android.util.Log is a stub on the JVM and throws when a unit test touches it.
+        // Log output is never the point of a test, so a missing log sink stays silent here
+        // instead of failing the domain code that happens to talk.
+        runCatching {
+            when (priority) {
+                Log.VERBOSE -> Log.v(fullTag, message)
+                Log.DEBUG -> Log.d(fullTag, message)
+                Log.INFO -> Log.i(fullTag, message)
+                Log.WARN -> if (throwable != null) Log.w(fullTag, message, throwable) else Log.w(fullTag, message)
+                Log.ERROR -> if (throwable != null) Log.e(fullTag, message, throwable) else Log.e(fullTag, message)
+            }
         }
     }
 }
