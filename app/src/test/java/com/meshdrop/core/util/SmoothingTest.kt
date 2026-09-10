@@ -18,7 +18,7 @@ class SmoothingTest {
     @Test
     fun `quantising removes the twitch from a readout`() {
         assertEquals(0.0, Smoothing.quantise(1_234.0), 0.0)
-        assertEquals(50_000.0, Smoothing.quantise(512_345.0), 0.0)
+        assertEquals(500_000.0, Smoothing.quantise(512_345.0), 0.0)
         assertEquals(3_000_000.0, Smoothing.quantise(3_112_233.0), 0.0)
     }
 

@@ -134,7 +134,7 @@ class SessionNegotiator(
     fun trustPeer(fingerprint: String, label: String) = rememberedPeers.remember(fingerprint, label)
 
     private fun ecdh(privateKey: PrivateKey, peerPublicKey: ByteArray): ByteArray {
-        val peerPublic = KeyFactory.getInstance(EC)
+        val peerPublic = KeyFactory.getInstance(EC_ALGORITHM)
             .generatePublic(X509EncodedKeySpec(peerPublicKey))
         return KeyAgreement.getInstance("ECDH").run {
             init(privateKey)
@@ -172,5 +172,6 @@ class SessionNegotiator(
     private companion object {
         const val TAG = "SessionNegotiator"
         const val EC_CURVE = "secp256r1"
+        const val EC_ALGORITHM = "EC"
     }
 }
