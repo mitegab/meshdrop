@@ -38,6 +38,9 @@ object TransferProtocol {
     const val PATH_UPLOAD = "/meshdrop/upload"
     const val PATH_COMPLETE = "/meshdrop/complete"
 
+    /** `GET /meshdrop/status?batchId=…` → what the receiver already holds for a batch. */
+    const val PATH_STATUS = "/meshdrop/status"
+
     const val HEADER_BATCH_ID = "X-MeshDrop-Batch"
     /** Present on an encrypted upload: the only thing a passive observer learns. */
     const val HEADER_ENCRYPTION = "X-MeshDrop-Enc"
@@ -118,6 +121,24 @@ data class UploadAck(
     val totalOnDisk: Long get() = resumedBytes + bytes
 }
 
+/**
+ * What the receiver already holds for a batch.
+ *
+ * Asked for before a *retry*, so the second attempt sends only what is missing. Not asked
+ * for on a first attempt: a fresh batch has nothing to report and the round trip would only
+ * delay the first byte.
+ */
+data class BatchStatus(
+    val batchId: String,
+    /** File ids that landed complete, in the order they arrived. */
+    val completedFileIds: List<String> = emptyList(),
+    val bytesReceived: Long = 0L,
+) {
+    fun isComplete(fileId: String): Boolean = fileId in completedFileIds
+
+    val isEmpty: Boolean get() = completedFileIds.isEmpty()
+}
+
 /** One file's outcome, reported by the sender when the batch is finished. */
 data class CompleteFile(
     val fileId: String,
@@ -186,6 +207,7 @@ object ControlMessages {
     private const val K_LANDED = "landed"
     private const val K_WRITTEN = "bytesWritten"
     private const val K_MISMATCH = "mismatch"
+    private const val K_COMPLETED = "completed"
     private const val K_DEVICE_ID = "deviceId"
     private const val K_PROTOCOL = "protocol"
 
@@ -347,6 +369,26 @@ object ControlMessages {
             }
             CompleteRequest(batchId = batchId, files = files)
         }.getOrNull()
+
+    fun BatchStatus.toJson(): String = JSONObject()
+        .put(K_BATCH, batchId)
+        .put(K_BYTES, bytesReceived)
+        .put(K_COMPLETED, JSONArray().apply { completedFileIds.forEach { put(it) } })
+        .toString()
+
+    fun parseBatchStatus(body: String): BatchStatus? = runCatching {
+        val json = JSONObject(body)
+        val array = json.optJSONArray(K_COMPLETED)
+        val completed = mutableListOf<String>()
+        for (index in 0 until (array?.length() ?: 0)) {
+            array?.optString(index)?.takeIf { it.isNotBlank() }?.let(completed::add)
+        }
+        BatchStatus(
+            batchId = json.optString(K_BATCH),
+            completedFileIds = completed,
+            bytesReceived = json.optLong(K_BYTES, 0L),
+        )
+    }.getOrNull()
 
     fun CompleteReport.toJson(): String = JSONObject()
         .put(K_LANDED, filesLanded)

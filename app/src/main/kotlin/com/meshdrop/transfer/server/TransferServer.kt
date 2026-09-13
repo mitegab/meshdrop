@@ -12,6 +12,7 @@ import com.meshdrop.transfer.crypto.SecurityOffer
 import com.meshdrop.transfer.crypto.SessionKeys
 import com.meshdrop.transfer.crypto.toDto
 import com.meshdrop.transfer.crypto.toOffer
+import com.meshdrop.transfer.protocol.BatchStatus
 import com.meshdrop.transfer.protocol.CompleteReport
 import com.meshdrop.transfer.protocol.ControlMessages
 import com.meshdrop.transfer.protocol.HandshakeResponse
@@ -134,6 +135,10 @@ class TransferServer(
                     handleUpload(head, input, output)
                 }
 
+                head.method == "GET" && head.path == TransferProtocol.PATH_STATUS -> {
+                    handleStatus(head, output)
+                }
+
                 head.method == "POST" && head.path == TransferProtocol.PATH_COMPLETE -> {
                     handleComplete(head, input, output)
                 }
@@ -193,7 +198,12 @@ class TransferServer(
 
         when (accepted) {
             true -> {
-                batches[request.batchId] = BatchState(incoming)
+                // Re-accepting the same batch (a retry) keeps what already landed; accepting
+                // a different set of files under an old id starts over.
+                val previous = batches[request.batchId]
+                val sameBatch = previous != null &&
+                    previous.request.files.map { it.id }.toSet() == files.map { it.id }.toSet()
+                batches[request.batchId] = if (sameBatch) previous!! else BatchState(incoming)
                 output.writeJson(200, "OK", acceptedJson(handler.localMaterialFor(request.batchId)?.toDto()))
             }
 
@@ -353,6 +363,28 @@ class TransferServer(
             handler.onBatchIntegrityFailed(batchId, mismatched)
         }
         output.writeJson(200, "OK", with(ControlMessages) { result.toJson() })
+    }
+
+    /**
+     * What we already hold for a batch, so a retry can skip it.
+     *
+     * Batch state survives a failed transfer on purpose: the files that did land are still
+     * on disk and still hashed, and throwing that away because the connection dropped is
+     * what makes a 10-file batch start over from file one.
+     */
+    private fun handleStatus(head: Http.RequestHead, output: BufferedOutputStream) {
+        val batchId = head.query.substringAfter("${TransferProtocol.QUERY_BATCH_ID}=", "").substringBefore('&')
+        val batch = batches[batchId]
+        if (batch == null) {
+            output.writeError(404, "Not Found", "Unknown or expired batch")
+            return
+        }
+        val status = BatchStatus(
+            batchId = batchId,
+            completedFileIds = batch.completed.toList(),
+            bytesReceived = batch.bytesWritten,
+        )
+        output.writeJson(200, "OK", with(ControlMessages) { status.toJson() })
     }
 
     /** Drops a batch (used when the user cancels a download). */

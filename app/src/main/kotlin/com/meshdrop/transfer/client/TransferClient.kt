@@ -12,6 +12,7 @@ import com.meshdrop.transfer.crypto.SecureFrames
 import com.meshdrop.transfer.crypto.TransferCrypto
 import com.meshdrop.transfer.crypto.toDto
 import com.meshdrop.transfer.crypto.toOffer
+import com.meshdrop.transfer.protocol.BatchStatus
 import com.meshdrop.transfer.protocol.CompleteFile
 import com.meshdrop.transfer.protocol.CompleteReport
 import com.meshdrop.transfer.protocol.CompleteRequest
@@ -87,6 +88,12 @@ class TransferClient(
         senderName: String,
         files: List<TransferFile>,
         crypto: TransferCrypto? = null,
+        /**
+         * True on a retry: ask the receiver what it already holds and skip those files.
+         * Off on a first attempt, where the answer is always "nothing" and the round trip
+         * would only delay the first byte.
+         */
+        resume: Boolean = false,
         isCancelled: () -> Boolean = { false },
         onFileStarted: (fileId: String) -> Unit = {},
         onFileProgress: (fileId: String, bytesSent: Long, sizeBytes: Long, bytesPerSecond: Long) -> Unit = { _, _, _, _ -> },
@@ -109,9 +116,22 @@ class TransferClient(
             return SendOutcome(false, handshake.message, emptyList())
         }
 
+        val alreadyThere = if (resume) {
+            runCatching { fetchStatus(peer, batchId) }.getOrNull() ?: BatchStatus(batchId)
+        } else {
+            BatchStatus(batchId)
+        }
+
         val outcomes = ArrayList<FileOutcome>(files.size)
         for (file in files) {
             if (isCancelled()) break
+            if (alreadyThere.isComplete(file.id)) {
+                MeshLog.i(TAG, "Skipping ${file.name}: the receiver already has it")
+                outcomes += FileOutcome(file.id, true, file.sizeBytes, "Already on the other device")
+                onFileStarted(file.id)
+                onFileFinished(file.id, true, null)
+                continue
+            }
             currentCoroutineContext().ensureActive()
             onFileStarted(file.id)
 
@@ -332,6 +352,20 @@ class TransferClient(
             response?.let { ControlMessages.parseCompleteReport(it.bodyText()) }
         }
     }
+
+    /** What the receiver already holds for [batchId]; null when it does not know the batch. */
+    fun fetchStatus(peer: PeerDevice, batchId: String): BatchStatus? = runCatching {
+        val socket = connect(peer)
+        socket.use {
+            it.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
+            it.getOutputStream().writeRequest(
+                method = "GET",
+                path = "${TransferProtocol.PATH_STATUS}?${TransferProtocol.QUERY_BATCH_ID}=$batchId",
+            )
+            val response = BufferedInputStream(it.getInputStream()).readResponse()
+            if (!response.isSuccessful) null else ControlMessages.parseBatchStatus(response.bodyText())
+        }
+    }.getOrNull()
 
     /** Cheap liveness probe used before offering a transfer. */
     fun ping(peer: PeerDevice): Boolean = runCatching {
