@@ -8,6 +8,10 @@ import com.meshdrop.core.model.TransferDirection
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.model.TransferJob
 import com.meshdrop.core.model.SecurityState
+import com.meshdrop.core.log.RetentionPolicy
+import com.meshdrop.core.log.TransferLogEntry
+import com.meshdrop.core.log.TransferLogSink
+import com.meshdrop.core.log.TransferLogStore
 import com.meshdrop.core.model.TransferStatus
 import com.meshdrop.core.queue.QueuePlan
 import com.meshdrop.core.queue.QueuedTransfer
@@ -112,6 +116,32 @@ class TransferEngine(
     private val batchCrypto = ConcurrentHashMap<String, BatchCrypto>()
 
     private val _security = MutableStateFlow<Map<String, SecurityState>>(emptyMap())
+
+    /**
+     * Every transfer that has finished, on disk.
+     *
+     * [jobs] is the live view and is deliberately short lived: it exists in memory for the
+     * session. The log is what makes "what did I send last Tuesday" answerable after a
+     * restart, which is the question the History screen exists to answer.
+     */
+    private val log = TransferLogStore(sink = logSink)
+
+    /** Finished transfers, newest first, including ones from previous sessions. */
+    fun loggedTransfers(): List<TransferLogEntry> = log.all()
+
+    /** Applies retention (age, size, failures kept) and reports how many entries went. */
+    fun pruneLog(
+        nowMillis: Long = now(),
+        policy: RetentionPolicy = logPolicy,
+        pinnedJobIds: Set<String> = emptySet(),
+    ): Int = log.prune(nowMillis, policy, pinnedJobIds).dropped.size
+
+    /** Forgets a single transfer — used when the user deletes it from History. */
+    fun forgetTransfer(jobId: String) {
+        log.replaceAll(log.all().filterNot { it.jobId == jobId })
+    }
+
+    fun clearLog() = log.clear()
 
     /** Live security state per batch: what the trust indicator and the padlock render. */
     val security: StateFlow<Map<String, SecurityState>> = _security.asStateFlow()
@@ -611,6 +641,9 @@ class TransferEngine(
             )
         }
         MeshLog.i(TAG, "Job $jobId finished: $status ${message ?: ""}")
+        // Recorded here rather than by the caller: every terminal path goes through this
+        // function, so there is no way to finish a transfer without logging it.
+        job(jobId)?.let { finished -> log.record(finished, securityFor(jobId)) }
     }
 
     /**

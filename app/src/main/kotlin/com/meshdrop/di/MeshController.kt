@@ -77,6 +77,16 @@ class MeshController(
         selectedPeer = peer
     }
 
+    /** Every finished transfer, newest first, surviving restarts. */
+    fun loggedTransfers() = engine.loggedTransfers()
+
+    fun forgetTransfer(jobId: String) = engine.forgetTransfer(jobId)
+
+    fun clearLog() = engine.clearLog()
+
+    /** Applies the retention policy; returns how many entries were dropped. */
+    fun pruneLog(): Int = engine.pruneLog()
+
     /** "Next in line" / "3rd in line" for a send that is waiting for a slot; null when it is moving. */
     fun queueLabelFor(jobId: String): String? = engine.queueLabelFor(jobId)
 

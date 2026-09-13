@@ -5,6 +5,7 @@ import android.os.StatFs
 import com.meshdrop.core.prefs.UserPreferences
 import com.meshdrop.core.storage.VolumeSpace
 import com.meshdrop.data.DocumentRepository
+import com.meshdrop.data.TransferLogFile
 import com.meshdrop.data.VaultStore
 import com.meshdrop.data.FileSpooler
 import com.meshdrop.data.ReceivedFileStore
@@ -45,6 +46,9 @@ class AppContainer(val application: Application) {
     /** Private storage for files the user moved out of shared storage. */
     val vaultStore = VaultStore(application)
 
+    /** The finished-transfer log. App-private: it names devices and files, so it is not shared storage. */
+    val transferLogFile = TransferLogFile(application.filesDir)
+
     val transferEngine = TransferEngine(
         scope = applicationScope,
         documentRepository = documentRepository,
@@ -56,6 +60,7 @@ class AppContainer(val application: Application) {
         localDeviceName = { userPreferences.deviceName.value },
         encryptionEnabled = { userPreferences.encryptionEnabled.value },
         storageVolume = { storageVolume() },
+        logSink = transferLogFile,
     )
 
     /**

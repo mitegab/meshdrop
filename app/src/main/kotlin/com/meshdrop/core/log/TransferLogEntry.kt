@@ -2,6 +2,7 @@ package com.meshdrop.core.log
 
 import com.meshdrop.core.model.SecurityState
 import com.meshdrop.core.model.TransferDirection
+import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.model.TransferJob
 import com.meshdrop.core.model.TransferStatus
 
@@ -62,6 +63,30 @@ data class TransferLogEntry(
         flag(integrityConfirmed),
         fileNames.joinToString(UNIT_SEPARATOR) { it.escape() },
     ).joinToString(SEPARATOR) { it.escape() }
+
+    /**
+     * The same transfer as the live model, so one screen can render both.
+     *
+     * Lossy in exactly one way: the per-file [com.meshdrop.core.model.TransferFile.localUri]
+     * is not logged, because a MediaStore row from last week is not a promise the file is
+     * still there. A row built from the log therefore shows everything about the transfer
+     * and offers nothing to open - the file itself is looked up where it actually lives.
+     */
+    fun toJob(): TransferJob = TransferJob(
+        id = jobId,
+        direction = direction,
+        peerName = peerName,
+        peerId = peerId,
+        files = fileNames.mapIndexed { index, name ->
+            TransferFile(id = "$jobId#$index", name = name, sizeBytes = 0L, status = status)
+        },
+        bytesTransferred = totalBytes,
+        totalBytes = totalBytes,
+        status = status,
+        message = message,
+        startedAtMillis = startedAtMillis,
+        finishedAtMillis = finishedAtMillis,
+    )
 
     companion object {
 
