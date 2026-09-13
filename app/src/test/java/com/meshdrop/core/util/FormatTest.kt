@@ -41,4 +41,46 @@ class FormatTest {
         assertEquals(50, Format.percent(5, 10))
         assertEquals(100, Format.percent(10, 10))
     }
+
+    @Test
+    fun `percentages are whole numbers with the sign in one place`() {
+        assertEquals("0%", Format.percentText(0, 100))
+        assertEquals("42%", Format.percentText(42, 100))
+        assertEquals("100%", Format.percentText(200, 100))
+        assertEquals("0%", Format.percentText(5, 0))
+    }
+
+    @Test
+    fun `relative time is coarse on purpose`() {
+        val now = 1_700_000_000_000L
+        assertEquals("just now", Format.relative(now - 5_000L, now))
+        assertEquals("just now", Format.relative(now + 60_000L, now))
+        assertEquals("1 min ago", Format.relative(now - 60_000L, now))
+        assertEquals("59 min ago", Format.relative(now - 59 * 60_000L, now))
+        assertEquals("1 h ago", Format.relative(now - 60 * 60_000L, now))
+        assertEquals("23 h ago", Format.relative(now - 23 * 60 * 60_000L, now))
+        assertEquals("1 d ago", Format.relative(now - 24 * 60 * 60_000L, now))
+        assertEquals("6 d ago", Format.relative(now - 6 * 24 * 60 * 60_000L, now))
+        assertEquals("1 wk ago", Format.relative(now - 7 * 24 * 60 * 60_000L, now))
+    }
+
+    @Test
+    fun `counts know about plurals`() {
+        assertEquals("1 file", Format.count(1, "file"))
+        assertEquals("3 files", Format.count(3, "file"))
+        assertEquals("0 files", Format.count(0, "file"))
+        assertEquals("1 entry", Format.count(1, "entry", "entries"))
+        assertEquals("2 entries", Format.count(2, "entry", "entries"))
+    }
+
+    @Test
+    fun `the count-up clock gains an hours column when it needs one`() {
+        assertEquals("0:00", Format.countUp(0))
+        assertEquals("0:07", Format.countUp(7_000L))
+        assertEquals("1:04", Format.countUp(64_000L))
+        assertEquals("59:59", Format.countUp(3_599_000L))
+        assertEquals("1:00:00", Format.countUp(3_600_000L))
+        assertEquals("1:02:03", Format.countUp(3_723_000L))
+        assertEquals("0:00", Format.countUp(-5_000L))
+    }
 }
