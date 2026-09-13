@@ -183,6 +183,9 @@ class TransferEngine(
                 finishJob(jobId, TransferStatus.FAILED, failed?.message)
             }
 
+            outcome.report?.integrityFailed == true ->
+                finishJob(jobId, TransferStatus.FAILED, outcome.report?.message)
+
             else -> finishJob(jobId, TransferStatus.COMPLETED, null)
         }
     }
@@ -320,6 +323,16 @@ class TransferEngine(
             updateSecurity(batchId) { it.copy(integrityConfirmed = true) }
         }
         completeJobIfDone(batchId)
+    }
+
+    override fun onBatchIntegrityFailed(batchId: String, fileIds: List<String>) {
+        val message = when (fileIds.size) {
+            1 -> "Integrity check failed on ${fileIds.first()}"
+            else -> "Integrity check failed on ${fileIds.size} files"
+        }
+        MeshLog.w(TAG, "Batch $batchId: $message")
+        fileIds.forEach { setFileStatus(batchId, it, TransferStatus.FAILED, message = message) }
+        finishJob(batchId, TransferStatus.FAILED, message)
     }
 
     override fun onFileFailed(batchId: String, fileId: String, reason: String) {

@@ -52,4 +52,13 @@ interface IncomingTransferHandler {
 
     /** A file could not be written. */
     fun onFileFailed(batchId: String, fileId: String, reason: String)
+
+    /**
+     * The sender's whole-file digest did not match what landed here.
+     *
+     * Every chunk passed its GCM tag, so this is not a corrupted socket read - it means the
+     * bytes that were picked are not the bytes that arrived. Rare, and worth saying out
+     * loud: the files stay on disk but the batch is marked failed.
+     */
+    fun onBatchIntegrityFailed(batchId: String, fileIds: List<String>) {}
 }

@@ -1,5 +1,7 @@
 package com.meshdrop.transfer.server
 
+import com.meshdrop.core.integrity.StreamingDigest
+import com.meshdrop.core.integrity.toHex
 import com.meshdrop.core.model.IncomingRequest
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.util.MeshLog
@@ -10,6 +12,7 @@ import com.meshdrop.transfer.crypto.SecurityOffer
 import com.meshdrop.transfer.crypto.SessionKeys
 import com.meshdrop.transfer.crypto.toDto
 import com.meshdrop.transfer.crypto.toOffer
+import com.meshdrop.transfer.protocol.CompleteReport
 import com.meshdrop.transfer.protocol.ControlMessages
 import com.meshdrop.transfer.protocol.HandshakeResponse
 import com.meshdrop.transfer.protocol.Http
@@ -29,6 +32,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.security.DigestOutputStream
+import java.security.MessageDigest
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
@@ -130,7 +135,7 @@ class TransferServer(
                 }
 
                 head.method == "POST" && head.path == TransferProtocol.PATH_COMPLETE -> {
-                    handleComplete(head, output)
+                    handleComplete(head, input, output)
                 }
 
                 else -> output.writeError(404, "Not Found", "Unknown endpoint ${head.path}")
@@ -227,6 +232,11 @@ class TransferServer(
 
         // The name comes from the peer; the store cleans it and numbers duplicates.
         val sink = fileStore.createSink(file.name, file.mimeType)
+        // Hash what actually reaches the disk, so a file can be compared against the
+        // sender's own digest once the batch is over - GCM tags prove each chunk survived,
+        // this proves the whole file is the one that was picked.
+        val digest = MessageDigest.getInstance(StreamingDigest.ALGORITHM)
+        val hashingStream = DigestOutputStream(sink.outputStream, digest)
         if (sink.displayName != file.name) {
             MeshLog.i(TAG, "Saving \"${file.name}\" as \"${sink.displayName}\"")
         }
@@ -253,10 +263,10 @@ class TransferServer(
                     key = decryptionKey,
                     source = input,
                     ciphertextLength = head.contentLength,
-                    sink = sink.outputStream,
+                    sink = hashingStream,
                 ) { copied -> handler.onFileProgress(batchId, fileId, copied, file.sizeBytes) }
             } else {
-                input.copyToWithProgress(sink.outputStream, head.contentLength) { copied ->
+                input.copyToWithProgress(hashingStream, head.contentLength) { copied ->
                     handler.onFileProgress(batchId, fileId, copied, file.sizeBytes)
                 }
             }
@@ -280,6 +290,10 @@ class TransferServer(
             return
         }
 
+        val landedDigest = digest.digest().toHex()
+        batch.digests[fileId] = landedDigest
+        batch.bytesWritten += expectedSize
+
         val uri = sink.finish()
         batch.completed += fileId
         handler.onFileCompleted(batchId, fileId, uri?.toString(), sink.displayName)
@@ -291,17 +305,54 @@ class TransferServer(
                     fileId = fileId,
                     bytes = expectedSize,
                     durationMillis = System.currentTimeMillis() - startedAt,
+                    digest = landedDigest,
                 ),
             ),
         )
     }
 
-    private fun handleComplete(head: Http.RequestHead, output: BufferedOutputStream) {
+    /**
+     * End of batch: compares the sender's digests with what landed and answers with a
+     * [CompleteReport].
+     *
+     * A v2 peer posts an empty body here, which parses to "no digests offered" and produces
+     * a report with nothing mismatched - the old behaviour, unchanged.
+     */
+    private fun handleComplete(
+        head: Http.RequestHead,
+        input: BufferedInputStream,
+        output: BufferedOutputStream,
+    ) {
         val batchId = head.query.substringAfter("${TransferProtocol.QUERY_BATCH_ID}=", "")
             .substringBefore('&')
+        val body = if (head.contentLength in 1..MAX_CONTROL_BYTES) {
+            runCatching { input.readExactly(head.contentLength).toString(Charsets.UTF_8) }.getOrDefault("")
+        } else {
+            ""
+        }
+        val report = ControlMessages.parseCompleteRequest(body, batchId)
         val batch = batches.remove(batchId)
         val received = batch?.completed?.size ?: 0
-        output.writeJson(200, "OK", completeJson(received))
+
+        val mismatched = report?.files
+            ?.filter { file -> file.digest != null }
+            ?.filterNot { file ->
+                val landed = batch?.digests?.get(file.fileId)
+                landed == null || landed.equals(file.digest, ignoreCase = true)
+            }
+            ?.map { it.fileId }
+            ?: emptyList()
+
+        val result = CompleteReport(
+            filesLanded = received,
+            bytesWritten = batch?.bytesWritten ?: 0L,
+            mismatchedFiles = mismatched,
+        )
+        if (result.integrityFailed) {
+            MeshLog.w(TAG, "Batch $batchId: ${result.message}")
+            handler.onBatchIntegrityFailed(batchId, mismatched)
+        }
+        output.writeJson(200, "OK", with(ControlMessages) { result.toJson() })
     }
 
     /** Drops a batch (used when the user cancels a download). */
@@ -316,7 +367,12 @@ class TransferServer(
     private class BatchState(
         val request: IncomingRequest,
         val completed: MutableSet<String> = ConcurrentHashMap.newKeySet(),
-    )
+        /** fileId → SHA-256 of what landed, for the end-of-batch comparison. */
+        val digests: MutableMap<String, String> = ConcurrentHashMap(),
+    ) {
+        @Volatile
+        var bytesWritten: Long = 0L
+    }
 
     companion object {
         const val TAG = "TransferServer"
@@ -350,9 +406,5 @@ class TransferServer(
 
         private fun uploadAckJson(ack: UploadAck): String = with(ControlMessages) { ack.toJson() }
 
-        private fun completeJson(received: Int): String = org.json.JSONObject()
-            .put("status", "completed")
-            .put("received", received)
-            .toString()
     }
 }

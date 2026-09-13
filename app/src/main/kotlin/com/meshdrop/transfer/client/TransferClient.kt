@@ -1,6 +1,8 @@
 package com.meshdrop.transfer.client
 
 import android.net.Uri
+import com.meshdrop.core.integrity.StreamingDigest
+import com.meshdrop.core.integrity.toHex
 import com.meshdrop.core.model.PeerDevice
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.util.MeshLog
@@ -10,6 +12,9 @@ import com.meshdrop.transfer.crypto.SecureFrames
 import com.meshdrop.transfer.crypto.TransferCrypto
 import com.meshdrop.transfer.crypto.toDto
 import com.meshdrop.transfer.crypto.toOffer
+import com.meshdrop.transfer.protocol.CompleteFile
+import com.meshdrop.transfer.protocol.CompleteReport
+import com.meshdrop.transfer.protocol.CompleteRequest
 import com.meshdrop.transfer.protocol.ControlMessages
 import com.meshdrop.transfer.protocol.FileMeta
 import com.meshdrop.transfer.protocol.HandshakeRequest
@@ -25,6 +30,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
+import java.security.DigestInputStream
+import java.security.MessageDigest
 import java.net.Socket
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -35,6 +42,8 @@ data class FileOutcome(
     val success: Boolean,
     val bytesSent: Long,
     val message: String?,
+    /** SHA-256 of the bytes we read off the disk, hex; null when the upload never started. */
+    val digest: String? = null,
 )
 
 /** What happened to a whole batch. */
@@ -42,8 +51,13 @@ data class SendOutcome(
     val accepted: Boolean,
     val message: String?,
     val outcomes: List<FileOutcome>,
+    /** The receiver's verdict from `POST /meshdrop/complete`; null for a v2 peer. */
+    val report: CompleteReport? = null,
 ) {
-    val isSuccess: Boolean get() = accepted && outcomes.all { it.success }
+    val isSuccess: Boolean get() = accepted && outcomes.all { it.success } && report?.integrityFailed != true
+
+    /** What the receiver said, when it said something worth repeating. */
+    val integrityMessage: String? get() = report?.message
 }
 
 /**
@@ -111,15 +125,29 @@ class TransferClient(
             onFileFinished(file.id, outcome.success, outcome.message)
         }
 
-        if (outcomes.isNotEmpty()) {
-            runCatching { notifyComplete(peer, batchId) }
-                .onFailure { MeshLog.v(TAG, "Completion ping failed (peer may already be gone)") }
+        // The digests travel at the end rather than in the handshake: the sender only knows
+        // them once it has read the file, and asking it to read every file twice to announce
+        // a checksum would double the time before the first byte moves.
+        val report = if (outcomes.isNotEmpty()) {
+            runCatching {
+                notifyComplete(
+                    peer = peer,
+                    batchId = batchId,
+                    files = outcomes.map { CompleteFile(it.fileId, it.bytesSent, it.digest) },
+                )
+            }.getOrElse { error ->
+                MeshLog.v(TAG, "Completion ping failed (peer may already be gone): ${error.message}")
+                null
+            }
+        } else {
+            null
         }
 
         return SendOutcome(
             accepted = true,
-            message = if (isCancelled()) "Cancelled" else null,
+            message = if (isCancelled()) "Cancelled" else report?.message,
             outcomes = outcomes,
+            report = report,
         )
     }
 
@@ -226,9 +254,14 @@ class TransferClient(
                 onFileProgress(file.id, sentNow, sizeBytes, bytesPerSecond)
             }
 
+            val digest = MessageDigest.getInstance(StreamingDigest.ALGORITHM)
+
             stream.use inner@{ input ->
-                val buffered =
+                val raw =
                     input as? BufferedInputStream ?: BufferedInputStream(input, TransferProtocol.CHUNK_BYTES)
+                // Hashing the plaintext, so the digest means the same thing on both sides
+                // whether or not this session is encrypted.
+                val buffered = DigestInputStream(raw, digest)
                 if (sessionKeys != null) {
                     SecureFrames.encryptStream(
                         key = sessionKeys.sendKey,
@@ -270,20 +303,33 @@ class TransferClient(
                         ?: "Receiver error (HTTP ${response.status})",
                 )
             }
+            // digest() resets the MessageDigest, so it is called exactly once.
+            val sentDigest = digest.digest().toHex()
             val ack = ControlMessages.parseUploadAck(response.bodyText())
-            FileOutcome(file.id, true, ack?.bytes ?: sent, null)
+            if (ack?.digest != null && !ack.digest.equals(sentDigest, ignoreCase = true)) {
+                MeshLog.w(TAG, "${file.name}: the receiver's digest does not match ours")
+            }
+            FileOutcome(file.id, true, ack?.bytes ?: sent, null, sentDigest)
         }
     }
 
-    private fun notifyComplete(peer: PeerDevice, batchId: String) {
+    private fun notifyComplete(
+        peer: PeerDevice,
+        batchId: String,
+        files: List<CompleteFile>,
+    ): CompleteReport? {
+        val body = with(ControlMessages) { CompleteRequest(batchId, files).toJson() }
+            .toByteArray(StandardCharsets.UTF_8)
         val socket = connect(peer)
-        socket.use {
+        return socket.use {
             it.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
             it.getOutputStream().writeRequest(
                 method = "POST",
                 path = "${TransferProtocol.PATH_COMPLETE}?${TransferProtocol.QUERY_BATCH_ID}=$batchId",
+                body = body,
             )
-            runCatching { BufferedInputStream(it.getInputStream()).readResponse() }
+            val response = runCatching { BufferedInputStream(it.getInputStream()).readResponse() }.getOrNull()
+            response?.let { ControlMessages.parseCompleteReport(it.bodyText()) }
         }
     }
 
