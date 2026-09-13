@@ -45,6 +45,8 @@ sealed interface TransferSessionState {
         val totalBytes: Long,
         val security: SecurityState,
         val arrivedAtMillis: Long,
+        /** Set when this fits but eats the headroom: shown above the Accept button. */
+        val spaceWarning: String? = null,
     ) : TransferSessionState
 
     /** Bytes are moving. This is the screen that has to feel great. */

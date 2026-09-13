@@ -44,11 +44,21 @@ object Http {
         val query: String,
         private val rawHeaders: Map<String, String>,
         val contentLength: Long,
+        /** False when the peer sent no `Content-Length` at all, as opposed to `0`. */
+        val hasContentLength: Boolean = true,
     ) {
         fun header(name: String): String? = rawHeaders[name.lowercase()]
 
         /** Path segments after the fixed prefix, e.g. `/meshdrop/upload/b42/0` → [b42, 0]. */
         fun segments(): List<String> = path.trim('/').split('/')
+
+        /**
+         * Where a resumed upload picks up, or null when the peer wants the whole file.
+         *
+         * Parsed by [HttpRanges] so the sender and the receiver cannot disagree about what
+         * a range means; an unparseable header is "no range", which restarts the file.
+         */
+        val rangeStart: Long? get() = HttpRanges.startOf(header(TransferProtocol.HEADER_RANGE))
     }
 
     // region client side ------------------------------------------------------------------
@@ -114,19 +124,24 @@ object Http {
     @Throws(IOException::class)
     fun BufferedInputStream.readRequestHead(): RequestHead? {
         val requestLine = readLineCrlf() ?: return null
-        val parts = requestLine.split(' ', limit = 3)
-        if (parts.size < 2) throw IOException("Malformed request line: $requestLine")
+        val parts = requestLine.split(' ')
+        // Three tokens exactly: a request line we cannot fully read is a request line we
+        // should not act on. Half-parsing a target is how a path ends up somewhere else.
+        if (parts.size != 3) throw IOException("Malformed request line: $requestLine")
+        if (!parts[2].startsWith("HTTP/")) throw IOException("Unsupported protocol: $requestLine")
         val target = parts[1]
         val queryIndex = target.indexOf('?')
         val path = if (queryIndex >= 0) target.substring(0, queryIndex) else target
         val query = if (queryIndex >= 0) target.substring(queryIndex + 1) else ""
         val headers = readHeaders()
+        val lengthHeader = headers["content-length"]
         return RequestHead(
             method = parts[0].uppercase(),
             path = path,
             query = query,
             rawHeaders = headers,
-            contentLength = headers["content-length"]?.toLongOrNull() ?: 0L,
+            contentLength = lengthHeader?.toLongOrNull() ?: 0L,
+            hasContentLength = lengthHeader != null,
         )
     }
 
@@ -213,6 +228,12 @@ object Http {
             if (separator <= 0) continue
             val name = line.substring(0, separator).trim().lowercase()
             val value = line.substring(separator + 1).trim()
+            // Two different answers to "how long is the body" is a request we cannot
+            // honour safely; RFC 9110 §6.3 says treat it as an error, and so do we.
+            val previous = headers[name]
+            if (previous != null && previous != value && name == "content-length") {
+                throw IOException("Conflicting Content-Length headers: $previous and $value")
+            }
             headers[name] = value
         }
         return headers

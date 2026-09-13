@@ -57,6 +57,23 @@ class DiscoveryCoordinator(
             }
             .stateIn(scope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /**
+     * Every route currently known, unmerged.
+     *
+     * [peers] collapses a device seen by two strategies into one entry; this keeps both,
+     * because "the address mDNS gave us is not answering" is exactly the moment the address
+     * the UDP beacon gave us becomes interesting.
+     */
+    val routes: StateFlow<List<PeerDevice>> =
+        combine(strategies.map { it.peers }) { lists: Array<List<PeerDevice>> ->
+            lists.fold(emptyList<PeerDevice>()) { acc, list -> acc + list }
+        }
+            .combine(sweep) { devices, _ ->
+                val cutoff = now() - peerTtl.inWholeMilliseconds
+                devices.filter { it.lastSeenMillis >= cutoff && it.host != null && it.port > 0 }
+            }
+            .stateIn(scope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
     val state: StateFlow<DiscoveryState> =
         combine(strategies.map { it.status }) { statuses: Array<StrategyStatus> ->
             DiscoveryState(

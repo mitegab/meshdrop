@@ -8,6 +8,7 @@ import com.meshdrop.core.model.TransferDirection
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.model.TransferJob
 import com.meshdrop.core.model.TransportLane
+import com.meshdrop.core.transport.LaneFailover
 
 /**
  * Turns engine state into screen state.
@@ -18,11 +19,23 @@ import com.meshdrop.core.model.TransportLane
  */
 object TransferSessionMapper {
 
-    /** The only lane the MVP can use; a failover engine will fill this list in later. */
+    /**
+     * How long after a switch the card keeps animating it.
+     *
+     * Long enough to be seen, short enough that it does not look like the transfer is still
+     * moving between pipes when it settled seconds ago.
+     */
+    private const val JUST_SWITCHED_WINDOW_MILLIS = 4_000L
+
+    /**
+     * @param lane the pipe carrying this job now; defaults to whatever the job recorded,
+     *             which is what makes a failover visible on the card.
+     */
     fun toSessionState(
         job: TransferJob,
         security: SecurityState = SecurityState.UNKNOWN,
-        lane: TransportLane = TransportLane.WIFI_LAN,
+        lane: TransportLane = job.lane,
+        nowMillis: Long = System.currentTimeMillis(),
     ): TransferSessionState {
         val files = job.files
         val totalBytes = job.totalBytes
@@ -60,13 +73,9 @@ object TransferSessionMapper {
             bytesTransferred = job.bytesTransferred,
             bytesPerSecond = job.bytesPerSecond,
             etaMillis = job.etaMillis,
-            lanes = listOf(
-                LaneActivity(
-                    lane = lane,
-                    bytesPerSecond = job.bytesPerSecond,
-                    active = true,
-                ),
-            ),
+            // The live pipe first, then the ones we gave up on — the route line draws the
+            // history, so a failover is visible rather than something only the log knows.
+            lanes = LaneFailover.activities(lane, job.bytesPerSecond, job.previousLanes),
             contributions = listOf(
                 PeerContribution(
                     peerId = job.peerId,
@@ -78,6 +87,8 @@ object TransferSessionMapper {
                 ),
             ),
             security = security,
+            justFailedOver = job.laneChangedAtMillis != null &&
+                nowMillis - job.laneChangedAtMillis <= JUST_SWITCHED_WINDOW_MILLIS,
         )
     }
 
@@ -92,6 +103,7 @@ object TransferSessionMapper {
         totalBytes = request.totalBytes,
         security = security,
         arrivedAtMillis = request.arrivedAtMillis,
+        spaceWarning = request.spaceWarning,
     )
 
     /** Placeholder shown while nothing has happened yet. */

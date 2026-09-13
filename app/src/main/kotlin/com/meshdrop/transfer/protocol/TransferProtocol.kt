@@ -20,18 +20,26 @@ import org.json.JSONObject
 object TransferProtocol {
 
     /**
-     * Bump together with [com.meshdrop.discovery.nsd.MeshDropService.PROTOCOL_VERSION].
+     * v1: plaintext.
+     * v2: optional end-to-end encryption (ephemeral ECDH + AES-256-GCM frames). A v2 peer
+     *     still talks plaintext to a v1 peer: both halves of the key exchange are optional,
+     *     and the transfer only becomes encrypted when *both* sides offer keys.
+     * v3: whole-file SHA-256 digests reported at completion, and resumable uploads via
+     *     `Range`. Both are opt-in per session: see [ProtocolVersions.capabilities].
      *
-     * v1: plaintext. v2: adds optional end-to-end encryption (ephemeral ECDH + AES-256-GCM
-     * frames). A v2 peer still talks plaintext to a v1 peer: both halves of the key exchange
-     * are optional, and the transfer only becomes encrypted when *both* sides offer keys.
+     * Discovery advertises its own attribute version separately
+     * ([com.meshdrop.discovery.nsd.MeshDropService.PROTOCOL_VERSION]); this one travels in
+     * the handshake body, which is the only place both sides have already agreed to talk.
      */
-    const val VERSION = 2
+    const val VERSION = ProtocolVersions.CURRENT
 
     const val PATH_PING = "/meshdrop/ping"
     const val PATH_HANDSHAKE = "/meshdrop/handshake"
     const val PATH_UPLOAD = "/meshdrop/upload"
     const val PATH_COMPLETE = "/meshdrop/complete"
+
+    /** `GET /meshdrop/status?batchId=…` → what the receiver already holds for a batch. */
+    const val PATH_STATUS = "/meshdrop/status"
 
     const val HEADER_BATCH_ID = "X-MeshDrop-Batch"
     /** Present on an encrypted upload: the only thing a passive observer learns. */
@@ -39,7 +47,16 @@ object TransferProtocol {
     const val HEADER_FILE_ID = "X-MeshDrop-File"
     const val HEADER_FILE_NAME = "X-MeshDrop-Name"
     const val HEADER_SENDER_ID = "X-MeshDrop-Sender"
+    /**
+     * Whole-file SHA-256, hex. Sent by the receiver in the upload ack (what it wrote) and by
+     * the sender at completion (what it read); the two are compared before a batch is called
+     * finished.
+     */
+    const val HEADER_DIGEST = "X-MeshDrop-Digest"
     const val QUERY_BATCH_ID = "batchId"
+
+    /** Standard `Range: bytes=<start>-` on a resumed upload; see [Http.rangeStart]. */
+    const val HEADER_RANGE = "Range"
 
     const val CONNECT_TIMEOUT_MS = 8_000
     const val SOCKET_TIMEOUT_MS = 30_000
@@ -96,7 +113,66 @@ data class UploadAck(
     val fileId: String,
     val bytes: Long,
     val durationMillis: Long,
+    /** SHA-256 of the file as it landed, hex. Absent when the peer is on protocol v2. */
+    val digest: String? = null,
+    /** Bytes the receiver already had and did not need again. */
+    val resumedBytes: Long = 0L,
+) {
+    val totalOnDisk: Long get() = resumedBytes + bytes
+}
+
+/**
+ * What the receiver already holds for a batch.
+ *
+ * Asked for before a *retry*, so the second attempt sends only what is missing. Not asked
+ * for on a first attempt: a fresh batch has nothing to report and the round trip would only
+ * delay the first byte.
+ */
+data class BatchStatus(
+    val batchId: String,
+    /** File ids that landed complete, in the order they arrived. */
+    val completedFileIds: List<String> = emptyList(),
+    val bytesReceived: Long = 0L,
+) {
+    fun isComplete(fileId: String): Boolean = fileId in completedFileIds
+
+    val isEmpty: Boolean get() = completedFileIds.isEmpty()
+}
+
+/** One file's outcome, reported by the sender when the batch is finished. */
+data class CompleteFile(
+    val fileId: String,
+    val bytes: Long,
+    val digest: String?,
 )
+
+/** The body of `POST /meshdrop/complete`. */
+data class CompleteRequest(
+    val batchId: String,
+    val files: List<CompleteFile>,
+)
+
+/**
+ * The receiver's verdict on the batch.
+ *
+ * [mismatchedFiles] is the interesting field: a file whose digest does not match was
+ * modified somewhere between the two disks, and the honest thing is to say so rather than
+ * to file it under Downloads and stay quiet.
+ */
+data class CompleteReport(
+    val filesLanded: Int,
+    val bytesWritten: Long,
+    val mismatchedFiles: List<String> = emptyList(),
+) {
+    val integrityFailed: Boolean get() = mismatchedFiles.isNotEmpty()
+
+    val message: String?
+        get() = when {
+            !integrityFailed -> null
+            mismatchedFiles.size == 1 -> "Integrity check failed on ${mismatchedFiles.first()}"
+            else -> "Integrity check failed on ${mismatchedFiles.size} files"
+        }
+}
 
 /**
  * JSON encoding/decoding of the control messages.
@@ -126,6 +202,12 @@ object ControlMessages {
     private const val K_SIGNATURE = "sig"
     private const val K_IDENTITY = "idpub"
     private const val K_FINGERPRINT = "idfp"
+    private const val K_SHA256 = "sha256"
+    private const val K_RESUMED = "resumed"
+    private const val K_LANDED = "landed"
+    private const val K_WRITTEN = "bytesWritten"
+    private const val K_MISMATCH = "mismatch"
+    private const val K_COMPLETED = "completed"
     private const val K_DEVICE_ID = "deviceId"
     private const val K_PROTOCOL = "protocol"
 
@@ -233,6 +315,10 @@ object ControlMessages {
         .put(K_ID, fileId)
         .put(K_BYTES, bytes)
         .put(K_DURATION, durationMillis)
+        .apply {
+            digest?.let { put(K_SHA256, it) }
+            if (resumedBytes > 0L) put(K_RESUMED, resumedBytes)
+        }
         .toString()
 
     fun parseUploadAck(body: String): UploadAck? = runCatching {
@@ -241,6 +327,86 @@ object ControlMessages {
             fileId = json.optString(K_ID),
             bytes = json.optLong(K_BYTES, 0L),
             durationMillis = json.optLong(K_DURATION, 0L),
+            digest = json.optString(K_SHA256).takeIf { it.isNotBlank() },
+            resumedBytes = json.optLong(K_RESUMED, 0L),
+        )
+    }.getOrNull()
+
+    fun CompleteRequest.toJson(): String = JSONObject()
+        .put(K_BATCH, batchId)
+        .put(K_FILES, JSONArray().apply {
+            files.forEach { file ->
+                put(
+                    JSONObject()
+                        .put(K_ID, file.fileId)
+                        .put(K_BYTES, file.bytes)
+                        .put(K_SHA256, file.digest ?: ""),
+                )
+            }
+        })
+        .toString()
+
+    /** Tolerates a v2 peer's empty completion body, which carries nothing but the batch id. */
+    fun parseCompleteRequest(body: String, fallbackBatchId: String? = null): CompleteRequest? =
+        runCatching {
+            if (body.isBlank()) {
+                return@runCatching fallbackBatchId?.let { CompleteRequest(it, emptyList()) }
+            }
+            val json = JSONObject(body)
+            val batchId = json.optString(K_BATCH).ifBlank { fallbackBatchId.orEmpty() }
+            if (batchId.isBlank()) return@runCatching null
+            val array = json.optJSONArray(K_FILES)
+            val files = mutableListOf<CompleteFile>()
+            for (index in 0 until (array?.length() ?: 0)) {
+                val entry = array?.optJSONObject(index) ?: continue
+                val id = entry.optString(K_ID)
+                if (id.isBlank()) continue
+                files += CompleteFile(
+                    fileId = id,
+                    bytes = entry.optLong(K_BYTES, 0L),
+                    digest = entry.optString(K_SHA256).takeIf { it.isNotBlank() },
+                )
+            }
+            CompleteRequest(batchId = batchId, files = files)
+        }.getOrNull()
+
+    fun BatchStatus.toJson(): String = JSONObject()
+        .put(K_BATCH, batchId)
+        .put(K_BYTES, bytesReceived)
+        .put(K_COMPLETED, JSONArray().apply { completedFileIds.forEach { put(it) } })
+        .toString()
+
+    fun parseBatchStatus(body: String): BatchStatus? = runCatching {
+        val json = JSONObject(body)
+        val array = json.optJSONArray(K_COMPLETED)
+        val completed = mutableListOf<String>()
+        for (index in 0 until (array?.length() ?: 0)) {
+            array?.optString(index)?.takeIf { it.isNotBlank() }?.let(completed::add)
+        }
+        BatchStatus(
+            batchId = json.optString(K_BATCH),
+            completedFileIds = completed,
+            bytesReceived = json.optLong(K_BYTES, 0L),
+        )
+    }.getOrNull()
+
+    fun CompleteReport.toJson(): String = JSONObject()
+        .put(K_LANDED, filesLanded)
+        .put(K_WRITTEN, bytesWritten)
+        .put(K_MISMATCH, JSONArray().apply { mismatchedFiles.forEach { put(it) } })
+        .toString()
+
+    fun parseCompleteReport(body: String): CompleteReport? = runCatching {
+        val json = JSONObject(body)
+        val array = json.optJSONArray(K_MISMATCH)
+        val mismatched = mutableListOf<String>()
+        for (index in 0 until (array?.length() ?: 0)) {
+            array?.optString(index)?.takeIf { it.isNotBlank() }?.let(mismatched::add)
+        }
+        CompleteReport(
+            filesLanded = json.optInt(K_LANDED, 0),
+            bytesWritten = json.optLong(K_WRITTEN, 0L),
+            mismatchedFiles = mismatched,
         )
     }.getOrNull()
 

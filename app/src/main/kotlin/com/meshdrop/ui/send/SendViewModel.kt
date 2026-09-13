@@ -69,7 +69,11 @@ class SendViewModel(
     private val _uiState = MutableStateFlow(SendUiState(selectedPeer = controller.selectedPeer))
     val uiState: StateFlow<SendUiState> = _uiState
 
-    val peers: StateFlow<List<PeerDevice>> = controller.peers
+    /** Nearest first: the ordering comes from measured round trips, not from names. */
+    val peers: StateFlow<List<PeerDevice>> = controller.rankedPeers
+
+    /** Round trip in ms per device id, for the "12 ms" line in the pill. */
+    val peerLatencies: StateFlow<Map<String, Long>> = controller.peerLatencies
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val session: StateFlow<TransferSessionState> = combine(
@@ -207,6 +211,20 @@ class SendViewModel(
         _uiState.value.activeJobId?.let(controller::cancel)
         telemetry.reset()
         _uiState.update { it.copy(activeJobId = null, isSending = false) }
+    }
+
+    /**
+     * Sends again, and only the files that did not make it.
+     *
+     * Keeps the same job, so the card the user was reading turns back into a progress bar
+     * rather than a second card appearing below it.
+     */
+    fun retry(batchId: String) {
+        if (!controller.retry(batchId)) {
+            _uiState.update { it.copy(error = "Nothing left to send in that batch") }
+            return
+        }
+        _uiState.update { it.copy(activeJobId = batchId, lastResult = null, finishedJobId = null, isSending = true) }
     }
 
     fun dismissResult() = _uiState.update { it.copy(lastResult = null, finishedJobId = null) }

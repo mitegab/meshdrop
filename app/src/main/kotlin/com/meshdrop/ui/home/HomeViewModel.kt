@@ -32,7 +32,8 @@ class HomeViewModel(
 ) : ViewModel() {
 
     val deviceName: StateFlow<String> = controller.deviceName
-    val peers: StateFlow<List<PeerDevice>> = controller.peers
+    /** Nearest and freshest first, unreachable last — see [com.meshdrop.core.model.PeerRanking]. */
+    val peers: StateFlow<List<PeerDevice>> = controller.rankedPeers
     val discoveryState: StateFlow<DiscoveryState> = controller.discoveryState
     val strategyStatuses: StateFlow<Map<com.meshdrop.core.model.DiscoveryKind, StrategyStatus>> =
         controller.strategyStatuses

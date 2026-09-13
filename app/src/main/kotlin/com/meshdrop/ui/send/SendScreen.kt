@@ -56,7 +56,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meshdrop.core.model.PeerDevice
+import com.meshdrop.core.model.TransferDirection
 import com.meshdrop.core.model.TransferFile
+import com.meshdrop.core.model.TransferStatus
 import com.meshdrop.core.util.Format
 import com.meshdrop.transfer.state.TransferSessionState
 import com.meshdrop.ui.components.ActiveTransferPanel
@@ -83,6 +85,7 @@ fun SendScreen(
     autoOpenPicker: Boolean = false,
 ) {
     val peers by viewModel.peers.collectAsStateWithLifecycle()
+    val latencies by viewModel.peerLatencies.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val session by viewModel.session.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -141,6 +144,7 @@ fun SendScreen(
                         items(items = peers, key = { it.id }) { peer ->
                             PeerPill(
                                 peer = peer,
+                                latencyMillis = latencies[peer.id],
                                 selected = peer.id == uiState.selectedPeer?.id,
                                 onClick = { viewModel.selectPeer(peer) },
                             )
@@ -228,9 +232,17 @@ fun SendScreen(
                     }
 
                     is TransferSessionState.Finished -> {
+                        val missing = state.files.count { it.status != TransferStatus.COMPLETED }
                         TransferFinishedCard(
                             state = state,
                             onDone = viewModel::dismissResult,
+                            // A retry only makes sense for something we were sending, and
+                            // only when at least one file is still missing.
+                            onRetry = if (state.direction == TransferDirection.SEND && missing > 0) {
+                                { viewModel.retry(state.batchId) }
+                            } else {
+                                null
+                            },
                             modifier = Modifier.padding(horizontal = 20.dp),
                         )
                     }
@@ -295,6 +307,7 @@ private fun SectionLabel(text: String) {
 @Composable
 private fun PeerPill(
     peer: PeerDevice,
+    latencyMillis: Long?,
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -321,7 +334,13 @@ private fun PeerPill(
         Spacer(modifier = Modifier.width(8.dp))
         Column {
             Text(peer.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(peer.kind.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                // A measured round trip says more than a transport name: "Wi-Fi Direct" and
+                // "Wi-Fi LAN" both hide anything from 5 ms to a hotspot three hops away.
+                text = latencyMillis?.let { "${peer.kind.label} · $it ms" } ?: peer.kind.label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -390,7 +409,7 @@ private fun FileRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (file.status != com.meshdrop.core.model.TransferStatus.WAITING) {
+            if (file.status != TransferStatus.WAITING) {
                 StatusChip(status = file.status)
                 Spacer(modifier = Modifier.width(8.dp))
             }

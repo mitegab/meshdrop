@@ -39,10 +39,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.meshdrop.core.offer.OfferPolicy
+import com.meshdrop.core.offer.OfferWindow
 import com.meshdrop.core.util.Format
 import com.meshdrop.transfer.state.TransferSessionState
 import com.meshdrop.ui.components.ActiveTransferPanel
@@ -70,6 +73,7 @@ fun ReceiveScreen(
     val deviceName by viewModel.deviceName.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
+    val now by viewModel.now.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(uiState.message) {
@@ -123,6 +127,7 @@ fun ReceiveScreen(
                     is TransferSessionState.IncomingOffer -> {
                         OfferCard(
                             state = session,
+                            nowMillis = now,
                             trustExpanded = session.batchId in uiState.expandedTrust,
                             onToggleTrust = { viewModel.toggleTrust(session.batchId) },
                             onConfirmCode = {
@@ -221,6 +226,7 @@ private fun VisibilityCard(
 @Composable
 private fun OfferCard(
     state: TransferSessionState.IncomingOffer,
+    nowMillis: Long,
     trustExpanded: Boolean,
     onToggleTrust: () -> Unit,
     onConfirmCode: () -> Unit,
@@ -229,8 +235,14 @@ private fun OfferCard(
     modifier: Modifier = Modifier,
 ) {
     val color = deviceColor(state.batchId)
+    val window = OfferWindow(state.arrivedAtMillis)
+    val expired = window.isExpired(nowMillis)
     Card(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            // The card fades as the window closes: a decision that is about to disappear
+            // should not look exactly like one that has all the time in the world.
+            .alpha(if (expired) 0.45f else 0.45f + 0.55f * window.fractionRemaining(nowMillis)),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
@@ -261,6 +273,15 @@ private fun OfferCard(
                         "${state.files.size} file(s) · ${Format.bytes(state.totalBytes)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = window.countdownLabel(nowMillis),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when (window.state(nowMillis)) {
+                            OfferPolicy.Stage.CLOSED -> MaterialTheme.colorScheme.error
+                            OfferPolicy.Stage.CLOSING -> MaterialTheme.colorScheme.tertiary
+                            OfferPolicy.Stage.OPEN -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
                 }
             }
@@ -299,6 +320,14 @@ private fun OfferCard(
                 )
             }
 
+            if (state.spaceWarning != null) {
+                Text(
+                    text = state.spaceWarning,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
             TrustIndicator(
                 security = state.security,
                 peerName = state.peerName,
@@ -310,11 +339,15 @@ private fun OfferCard(
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
                     onClick = onDecline,
+                    enabled = !expired,
                     modifier = Modifier.weight(1f).height(50.dp),
                     shape = RoundedCornerShape(14.dp),
                 ) { Text("Decline") }
                 Button(
                     onClick = onAccept,
+                    // Accepting after the window closed would hang: the sender is already
+                    // gone, so the tap would look like the app froze.
+                    enabled = !expired,
                     modifier = Modifier.weight(1f).height(50.dp),
                     shape = RoundedCornerShape(14.dp),
                 ) {

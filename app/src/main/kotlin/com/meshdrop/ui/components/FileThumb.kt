@@ -12,7 +12,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -91,10 +94,19 @@ fun FileThumb(
     }
 }
 
-/** One icon per file family, reused by the picker, the transfer panel and history. */
-fun iconForMime(mimeType: String?): ImageVector = when {
-    mimeType?.startsWith("image/") == true -> Icons.Default.Image
-    mimeType?.startsWith("video/") == true -> Icons.Default.VideoFile
-    mimeType?.startsWith("audio/") == true -> Icons.Default.AudioFile
-    else -> Icons.Default.Description
-}
+/**
+ * One icon per file family, reused by the picker, the transfer panel and history.
+ *
+ * The decision itself lives in [FileCategory] so every screen agrees on what a file is;
+ * this is only the mapping from that answer to a drawable.
+ */
+fun iconForMime(mimeType: String?, fileName: String? = null): ImageVector =
+    when (com.meshdrop.core.model.FileCategory.of(mimeType, fileName)) {
+        com.meshdrop.core.model.FileCategory.IMAGE -> Icons.Default.Image
+        com.meshdrop.core.model.FileCategory.VIDEO -> Icons.Default.VideoFile
+        com.meshdrop.core.model.FileCategory.AUDIO -> Icons.Default.AudioFile
+        com.meshdrop.core.model.FileCategory.ARCHIVE -> Icons.Default.Folder
+        com.meshdrop.core.model.FileCategory.APP -> Icons.Default.Android
+        com.meshdrop.core.model.FileCategory.DOCUMENT -> Icons.Default.Description
+        com.meshdrop.core.model.FileCategory.OTHER -> Icons.Default.InsertDriveFile
+    }

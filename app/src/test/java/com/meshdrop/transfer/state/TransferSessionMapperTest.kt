@@ -9,6 +9,7 @@ import com.meshdrop.core.model.TransferJob
 import com.meshdrop.core.model.TransferStatus
 import com.meshdrop.core.model.TransportLane
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -44,6 +45,39 @@ class TransferSessionMapperTest {
         val state = TransferSessionMapper.toSessionState(job(TransferStatus.WAITING))
         assertTrue(state is TransferSessionState.AwaitingApproval)
         assertEquals("Pixel 8", (state as TransferSessionState.AwaitingApproval).peerName)
+    }
+
+    @Test
+    fun `a job that gave up on a lane shows both, live one first`() {
+        val moved = job(TransferStatus.IN_PROGRESS, transferred = 1_000).copy(
+            lane = TransportLane.WIFI_DIRECT,
+            previousLanes = listOf(TransportLane.WIFI_LAN),
+            laneChangedAtMillis = 10_000L,
+        )
+
+        val active = TransferSessionMapper.toSessionState(moved, nowMillis = 11_000L)
+            as TransferSessionState.Active
+
+        assertEquals(TransportLane.WIFI_DIRECT, active.primaryLane)
+        assertEquals(2, active.lanes.size)
+        assertTrue(active.lanes.first().active)
+        assertEquals(TransportLane.WIFI_LAN, active.lanes.last().lane)
+        assertTrue("a switch a second ago is still worth animating", active.justFailedOver)
+    }
+
+    @Test
+    fun `the failover animation stops once the transfer has settled`() {
+        val moved = job(TransferStatus.IN_PROGRESS).copy(
+            lane = TransportLane.BLUETOOTH,
+            previousLanes = listOf(TransportLane.WIFI_LAN),
+            laneChangedAtMillis = 10_000L,
+        )
+
+        val settled = TransferSessionMapper.toSessionState(moved, nowMillis = 10_000L + 30_000L)
+            as TransferSessionState.Active
+        assertFalse(settled.justFailedOver)
+        // the route line still shows where it came from
+        assertEquals(2, settled.lanes.size)
     }
 
     @Test

@@ -51,9 +51,29 @@ class HistoryViewModel(
     private val _uiState = MutableStateFlow(HistoryUiState())
     val uiState: StateFlow<HistoryUiState> = _uiState
 
+    init {
+        // Retention runs when the log is actually read, on a background thread: pruning at
+        // app start would put file IO on the critical path of showing the first screen.
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { controller.pruneLog() }
+                .onFailure { MeshLog.w(TAG, "Retention pass failed", it) }
+        }
+    }
+
+    /**
+     * Finished transfers: the live ones from this session, then everything the log still holds.
+     *
+     * Live jobs win when both have the same id - they still have the file Uris, so Open and
+     * Share work on them. Rows from the log are the older history that survived a restart.
+     */
     val groups: StateFlow<List<HistoryDay>> = controller.jobs
         .map { jobs ->
-            jobs.filter { it.status.isFinished }
+            val live = jobs.filter { it.status.isFinished }
+            val liveIds = live.map { it.id }.toSet()
+            val logged = controller.loggedTransfers()
+                .filterNot { it.jobId in liveIds }
+                .map { it.toJob() }
+            (live + logged)
                 .sortedByDescending { it.finishedAtMillis ?: it.startedAtMillis }
                 .groupBy { job -> dayOf(job.finishedAtMillis ?: job.startedAtMillis) }
                 .map { (day, list) -> HistoryDay(label = labelFor(day), jobs = list) }
@@ -74,6 +94,7 @@ class HistoryViewModel(
         }
         viewModelScope.launch {
             val deleted = withContext(Dispatchers.IO) { deleteLocal(job) }
+            controller.forgetTransfer(job.id)
             controller.clearFinished()
             _uiState.update {
                 it.copy(
@@ -83,7 +104,12 @@ class HistoryViewModel(
         }
     }
 
-    fun clearAll() = controller.clearFinished()
+    /** Forgets the whole history: the session's jobs and the log file. */
+    fun clearAll() {
+        controller.clearFinished()
+        controller.clearLog()
+        _uiState.update { it.copy(message = "History cleared") }
+    }
 
     /** Jobs whose files are in the vault rather than in shared storage. */
     val vaultedJobs: StateFlow<Set<String>> = preferences.vaultedJobs

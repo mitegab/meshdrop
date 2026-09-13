@@ -8,7 +8,23 @@ import com.meshdrop.core.model.TransferDirection
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.model.TransferJob
 import com.meshdrop.core.model.SecurityState
+import com.meshdrop.core.log.RetentionPolicy
+import com.meshdrop.core.log.TransferLogEntry
+import com.meshdrop.core.log.TransferLogSink
+import com.meshdrop.core.log.TransferLogStore
 import com.meshdrop.core.model.TransferStatus
+import com.meshdrop.core.model.TransportLane
+import com.meshdrop.core.model.lane
+import com.meshdrop.core.transport.LaneFailover
+import com.meshdrop.core.queue.QueuePlan
+import com.meshdrop.core.queue.QueuedTransfer
+import com.meshdrop.core.queue.RunningTransfer
+import com.meshdrop.core.queue.TransferScheduler
+import com.meshdrop.core.offer.OfferPolicy
+import com.meshdrop.core.offer.OfferWindow
+import com.meshdrop.core.storage.SpaceGuard
+import com.meshdrop.core.storage.VolumeSpace
+import com.meshdrop.core.storage.SpaceVerdict
 import com.meshdrop.core.util.MeshLog
 import com.meshdrop.data.DocumentRepository
 import com.meshdrop.data.FileSpooler
@@ -30,6 +46,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -57,16 +74,77 @@ class TransferEngine(
     private val localDeviceName: () -> String,
     /** Read live from settings: switching encryption off affects the next transfer. */
     private val encryptionEnabled: () -> Boolean = { true },
+    /**
+     * The volume incoming files land on. Read per transfer rather than once at startup: free
+     * space changes while the app is open, and a stale reading is how a check ends up
+     * approving something that no longer fits.
+     */
+    private val storageVolume: () -> VolumeSpace = { VolumeSpace.UNKNOWN },
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : IncomingTransferHandler {
 
     private val client = TransferClient(documentRepository, fileSpooler)
+
+    /** A send waiting for a slot on the radio. */
+    private class PendingSend(
+        val queued: QueuedTransfer,
+        val peer: PeerDevice,
+        val files: List<TransferFile>,
+        /** True for a retry: ask the receiver what it already holds before sending. */
+        val resume: Boolean = false,
+    )
+
+    /**
+     * The peer each sent batch was addressed to, so a retry has somewhere to go.
+     *
+     * A [TransferJob] keeps the peer's name and id for display; it deliberately does not
+     * keep the address, which goes stale as peers roam. The retry needs a live endpoint, so
+     * the last known [PeerDevice] is kept here and re-resolved if it has moved.
+     */
+    private val batchPeers = ConcurrentHashMap<String, PeerDevice>()
+
+    /** Guarded by [queueLock]: pumped from the send path, from job completion and from cancel. */
+    private val pendingSends = LinkedHashMap<String, PendingSend>()
+    private val queueLock = Any()
+
+    private val _queuePlan = MutableStateFlow(
+        QueuePlan(start = emptyList(), waiting = emptyList(), limitReached = false),
+    )
+
+    /** What the scheduler decided last, for the "N jobs waiting" line. */
+    val queuePlan: StateFlow<QueuePlan> = _queuePlan.asStateFlow()
 
     /** Ephemeral ECDH + AES-256-GCM sessions, one per batch. */
     private val negotiator = SessionNegotiator(identity, trustedPeers)
     private val batchCrypto = ConcurrentHashMap<String, BatchCrypto>()
 
     private val _security = MutableStateFlow<Map<String, SecurityState>>(emptyMap())
+
+    /**
+     * Every transfer that has finished, on disk.
+     *
+     * [jobs] is the live view and is deliberately short lived: it exists in memory for the
+     * session. The log is what makes "what did I send last Tuesday" answerable after a
+     * restart, which is the question the History screen exists to answer.
+     */
+    private val log = TransferLogStore(sink = logSink)
+
+    /** Finished transfers, newest first, including ones from previous sessions. */
+    fun loggedTransfers(): List<TransferLogEntry> = log.all()
+
+    /** Applies retention (age, size, failures kept) and reports how many entries went. */
+    fun pruneLog(
+        nowMillis: Long = now(),
+        policy: RetentionPolicy = logPolicy,
+        pinnedJobIds: Set<String> = emptySet(),
+    ): Int = log.prune(nowMillis, policy, pinnedJobIds).dropped.size
+
+    /** Forgets a single transfer — used when the user deletes it from History. */
+    fun forgetTransfer(jobId: String) {
+        log.replaceAll(log.all().filterNot { it.jobId == jobId })
+    }
+
+    fun clearLog() = log.clear()
 
     /** Live security state per batch: what the trust indicator and the padlock render. */
     val security: StateFlow<Map<String, SecurityState>> = _security.asStateFlow()
@@ -131,6 +209,17 @@ class TransferEngine(
             startedAtMillis = now(),
         )
         _jobs.update { list -> list + job }
+
+        // Files with an unknown size get spooled to our own cache first, which needs room for
+        // a second copy. Checking before the first byte beats explaining a half-sent video.
+        val spools = files.any { it.sizeBytes <= 0L }
+        val space = SpaceGuard.forVolume(job.totalBytes, storageVolume(), spooled = spools)
+        if (!space.fits) {
+            MeshLog.w(TAG, "Job $jobId refused: ${space.message}")
+            finishJob(jobId, TransferStatus.FAILED, space.message)
+            return@withContext jobId
+        }
+
         // No crypto object at all when encryption is switched off: the client then sends a
         // handshake with no security block, and the peer shows "Not encrypted".
         if (encryptionEnabled()) {
@@ -138,12 +227,103 @@ class TransferEngine(
         }
         MeshLog.i(TAG, "Queued send job $jobId (${job.totalBytes} bytes → ${peer.name})")
 
-        scope.launch(Dispatchers.IO) { runSendJob(jobId, peer, files) }
+        batchPeers[jobId] = peer
+        enqueue(PendingSend(QueuedTransfer(jobId, peer.id, job.totalBytes, now()), peer, files))
         jobId
     }
 
-    private suspend fun runSendJob(jobId: String, peer: PeerDevice, files: List<TransferFile>) {
+    /**
+     * Sends again, and only what is missing.
+     *
+     * A batch of ten that dropped on number nine used to mean picking all ten again. The
+     * batch id is reused on purpose: the receiver still holds the nine that landed (feature
+     * 24), so [TransferClient.send] with `resume = true` asks what it has and skips them,
+     * and the user watches one file move instead of ten.
+     *
+     * @return false when there is nothing to retry — not a send job, no files missing, or
+     *         the peer is no longer known.
+     */
+    fun retry(jobId: String): Boolean {
+        val job = _jobs.value.firstOrNull { it.id == jobId } ?: return false
+        if (job.direction != TransferDirection.SEND) return false
+        val peer = batchPeers[jobId] ?: return false
+        val missing = job.files.filter { it.status != TransferStatus.COMPLETED }
+        if (missing.isEmpty()) return false
+
+        MeshLog.i(TAG, "Retrying ${missing.size}/${job.files.size} file(s) of $jobId → ${peer.name}")
+        cancelled -= jobId
+        _jobs.update { list ->
+            list.map { existing ->
+                if (existing.id != jobId) existing else existing.copy(
+                    status = TransferStatus.WAITING,
+                    message = null,
+                    finishedAtMillis = null,
+                    bytesPerSecond = 0L,
+                    files = existing.files.map { file ->
+                        if (file.status == TransferStatus.COMPLETED) file else file.copy(
+                            status = TransferStatus.WAITING,
+                            message = null,
+                            bytesTransferred = 0L,
+                        )
+                    },
+                )
+            }
+        }
+        // The crypto session died with the connection; a fresh one is negotiated for the
+        // retry rather than reusing keys the peer has already discarded.
+        batchCrypto.remove(jobId)
+        if (encryptionEnabled()) {
+            batchCrypto[jobId] = BatchCrypto(negotiator, EndpointRole.SENDER)
+        }
+        enqueue(PendingSend(QueuedTransfer(jobId, peer.id, job.totalBytes, now()), peer, missing, resume = true))
+        return true
+    }
+
+    /**
+     * "3rd in line" — null when the job is already moving or is not queued at all.
+     *
+     * Wi-Fi is one radio: five batches at once do not finish sooner than two, and each of
+     * the five progress bars would be showing a fifth of the real speed as if it were the
+     * whole thing. Queuing costs a wait that can be *shown*; not queuing costs honesty.
+     */
+    fun queueLabelFor(jobId: String): String? = _queuePlan.value.labelFor(jobId)
+
+    fun enqueue(pending: PendingSend) {
+        synchronized(queueLock) { pendingSends[pending.queued.jobId] = pending }
+        pumpQueue()
+    }
+
+    /** Starts whatever the scheduler says may go now, and leaves the rest waiting. */
+    private fun pumpQueue() {
+        val start = synchronized(queueLock) {
+            val running = _jobs.value
+                .filter { it.direction == TransferDirection.SEND && it.status == TransferStatus.IN_PROGRESS }
+                .map { RunningTransfer(it.id, it.peerId, it.bytesTransferred, it.totalBytes) }
+            val waiting = pendingSends.values.map { it.queued }
+            val plan = TransferScheduler.schedule(running, waiting)
+            _queuePlan.value = plan
+            plan.start.mapNotNull { pendingSends.remove(it.jobId) }
+        }
+        start.forEach { pending ->
+            MeshLog.i(TAG, "Starting queued send ${pending.queued.jobId}")
+            scope.launch(Dispatchers.IO) {
+                runSendJob(pending.queued.jobId, pending.peer, pending.files, pending.resume)
+            }
+        }
+    }
+
+    private suspend fun runSendJob(
+        jobId: String,
+        peer: PeerDevice,
+        files: List<TransferFile>,
+        resume: Boolean = false,
+    ) {
         updateJob(jobId, force = true) { it.copy(status = TransferStatus.IN_PROGRESS) }
+
+        // Watched separately from the transfer: the copy loop only reports while bytes move,
+        // and the case we care about is precisely the one where they stop.
+        val watcher = LaneWatcher(jobId, peer.kind.lane, now())
+        val watchJob = scope.launch { watcher.run() }
 
         val outcome: SendOutcome = try {
             client.send(
@@ -153,10 +333,12 @@ class TransferEngine(
                 senderName = localDeviceName(),
                 files = files,
                 crypto = batchCrypto[jobId],
+                resume = resume,
                 isCancelled = { jobId in cancelled },
                 onFileStarted = { fileId -> setFileStatus(jobId, fileId, TransferStatus.IN_PROGRESS) },
                 onFileProgress = { fileId, bytesSent, sizeBytes, bytesPerSecond ->
                     reportSendProgress(jobId, fileId, bytesSent, sizeBytes, bytesPerSecond)
+                    watcher.noteProgress(bytesPerSecond)
                 },
                 onFileFinished = { fileId, success, message ->
                     setFileStatus(
@@ -171,6 +353,21 @@ class TransferEngine(
             MeshLog.e(TAG, "Send job $jobId crashed", error)
             finishJob(jobId, TransferStatus.FAILED, error.message)
             return
+        } finally {
+            watchJob.cancel()
+            laneWatchers.remove(jobId)
+        }
+
+        // The watcher gave up on the route and closed the socket. Everything that landed is
+        // still on the receiver, so the honest move is to try another way to the same device
+        // rather than reporting a failure the user cannot do anything about.
+        if (watcher.failedOver && jobId !in cancelled) {
+            val remaining = _jobs.value.firstOrNull { it.id == jobId }
+                ?.files?.filter { it.status != TransferStatus.COMPLETED }
+                ?: emptyList()
+            if (remaining.isNotEmpty() && reroute(jobId, peer, watcher)) {
+                return
+            }
         }
 
         recordSecurity(jobId)
@@ -183,9 +380,99 @@ class TransferEngine(
                 finishJob(jobId, TransferStatus.FAILED, failed?.message)
             }
 
+            outcome.report?.integrityFailed == true ->
+                finishJob(jobId, TransferStatus.FAILED, outcome.report?.message)
+
             else -> finishJob(jobId, TransferStatus.COMPLETED, null)
         }
     }
+
+    /** Per-job failover state, so the watcher can outlive one progress callback. */
+    private val laneWatchers = ConcurrentHashMap<String, LaneWatcher>()
+
+    /**
+     * Decides when the pipe we are on has gone bad.
+     *
+     * Thresholds come from [LaneFailover]; this class only keeps the clocks those rules need
+     * (last progress, how long we have been crawling) and pulls the trigger.
+     */
+    private inner class LaneWatcher(
+        private val jobId: String,
+        private val lane: TransportLane,
+        startedAtMillis: Long,
+    ) {
+        @Volatile private var lastProgressMillis = startedAtMillis
+        @Volatile private var bytesPerSecond = 0L
+        @Volatile private var slowSinceMillis: Long? = null
+
+        /** Set when we closed the socket because the route stopped working. */
+        @Volatile var failedOver = false
+            private set
+
+        fun noteProgress(rate: Long) {
+            bytesPerSecond = rate
+            if (rate > 0L) lastProgressMillis = now()
+            slowSinceMillis = if (LaneFailover.isCrawling(rate)) slowSinceMillis ?: now() else null
+        }
+
+        suspend fun run() {
+            while (true) {
+                kotlinx.coroutines.delay(CHECK_INTERVAL_MILLIS)
+                if (failedOver) return
+                val decision = LaneFailover.decide(
+                    current = lane,
+                    lastProgressMillis = lastProgressMillis,
+                    bytesPerSecond = bytesPerSecond,
+                    nowMillis = now(),
+                    candidates = alternativeRoutes(peerIdOf(jobId)).map { it.kind.lane }.distinct(),
+                    slowSinceMillis = slowSinceMillis,
+                )
+                if (!decision.failedOver) continue
+                failedOver = true
+                MeshLog.w(TAG, "$jobId: giving up on ${lane.label} (${decision.reason})")
+                client.abort(jobId)
+                return
+            }
+        }
+    }
+
+    /**
+     * Moves a stalled transfer onto another route to the same device and picks up where it
+     * stopped. Returns false when there is nowhere else to go, so the caller can fail the
+     * job honestly instead of silently doing nothing.
+     */
+    private fun reroute(jobId: String, from: PeerDevice, watcher: LaneWatcher): Boolean {
+        val alternative = alternativeRoutes(from.id)
+            .firstOrNull { it.host != from.host || it.port != from.port }
+            ?: run {
+                MeshLog.w(TAG, "$jobId: no other route to ${from.name}")
+                return false
+            }
+        val lane = alternative.kind.lane
+        MeshLog.i(TAG, "$jobId: switching to ${alternative.endpoint} (${lane.label})")
+        updateJob(jobId, force = true) { job ->
+            job.copy(
+                lane = lane,
+                previousLanes = job.previousLanes + job.lane,
+                laneChangedAtMillis = now(),
+                message = "Switched to ${lane.label}",
+            )
+        }
+        batchPeers[jobId] = alternative
+        // The batch id is reused, so the receiver keeps what landed and the retry sends the rest.
+        enqueue(
+            PendingSend(
+                QueuedTransfer(jobId, alternative.id, job(jobId)?.totalBytes ?: 0L, now()),
+                alternative,
+                _jobs.value.firstOrNull { it.id == jobId }?.files
+                    ?.filter { it.status != TransferStatus.COMPLETED } ?: emptyList(),
+                resume = true,
+            ),
+        )
+        return true
+    }
+
+    private fun peerIdOf(jobId: String): String = _jobs.value.firstOrNull { it.id == jobId }?.peerId ?: ""
 
     private fun reportSendProgress(
         jobId: String,
@@ -214,17 +501,55 @@ class TransferEngine(
     // region receiving --------------------------------------------------------------------
 
     override suspend fun requestApproval(request: IncomingRequest): Boolean {
+        // Receiving is where a full disk actually bites: the sender has already spent the
+        // time and the only honest outcome is a truncated file. Spooled = true because a
+        // file of unknown size is written to a scratch directory before it is published.
+        val space = SpaceGuard.forVolume(request.totalBytes, storageVolume(), spooled = true)
+        if (space.verdict == SpaceVerdict.NOT_ENOUGH) {
+            val reason = space.message ?: "Not enough space"
+            MeshLog.w(TAG, "Declining ${request.batchId}: $reason")
+            _jobs.update { list ->
+                list + TransferJob(
+                    id = request.batchId,
+                    direction = TransferDirection.RECEIVE,
+                    peerName = request.senderName,
+                    peerId = request.senderId,
+                    files = request.files.map { it.copy(status = TransferStatus.FAILED) },
+                    totalBytes = request.totalBytes,
+                    status = TransferStatus.FAILED,
+                    message = reason,
+                    startedAtMillis = now(),
+                    finishedAtMillis = now(),
+                )
+            }
+            return false
+        }
+
         val decision = CompletableDeferred<Boolean>()
         pendingDecisions[request.batchId] = decision
-        _incoming.update { list -> list.filterNot { it.batchId == request.batchId } + request }
+        _incoming.update { list ->
+            list.filterNot { it.batchId == request.batchId } +
+                if (space.verdict == SpaceVerdict.TIGHT) request.copy(spaceWarning = space.message) else request
+        }
         MeshLog.i(TAG, "Incoming batch ${request.batchId} from ${request.senderName}")
 
-        val accepted = try {
-            decision.await()
+        // The card on the other device counts down; this one has to stop waiting too. An
+        // offer that is never answered would otherwise hold a handshake open until the
+        // sender's own socket timeout, and the sender would be told "connection lost"
+        // instead of "nobody answered".
+        val window = OfferWindow(request.arrivedAtMillis)
+        val waitMillis = (OfferPolicy.answerByMillis(request.arrivedAtMillis) - now()).coerceAtLeast(0L)
+        val answer = try {
+            withTimeoutOrNull(waitMillis) { decision.await() }
         } finally {
             pendingDecisions.remove(request.batchId)
             _incoming.update { list -> list.filterNot { it.batchId == request.batchId } }
         }
+
+        if (answer == null) {
+            MeshLog.i(TAG, OfferPolicy.expiredNotice(request.senderName, waitMillis))
+        }
+        val accepted = answer == true
 
         if (accepted) {
             _jobs.update { list ->
@@ -313,13 +638,23 @@ class TransferEngine(
         }
     }
 
-    override fun onFileCompleted(batchId: String, fileId: String, uri: String?) {
-        setFileStatus(batchId, fileId, TransferStatus.COMPLETED, localUri = uri)
+    override fun onFileCompleted(batchId: String, fileId: String, uri: String?, landedName: String?) {
+        setFileStatus(batchId, fileId, TransferStatus.COMPLETED, localUri = uri, name = landedName)
         if (batchCrypto[batchId]?.sessionKeys() != null) {
             // Every GCM tag checked out, otherwise decryptStream would have thrown.
             updateSecurity(batchId) { it.copy(integrityConfirmed = true) }
         }
         completeJobIfDone(batchId)
+    }
+
+    override fun onBatchIntegrityFailed(batchId: String, fileIds: List<String>) {
+        val message = when (fileIds.size) {
+            1 -> "Integrity check failed on ${fileIds.first()}"
+            else -> "Integrity check failed on ${fileIds.size} files"
+        }
+        MeshLog.w(TAG, "Batch $batchId: $message")
+        fileIds.forEach { setFileStatus(batchId, it, TransferStatus.FAILED, message = message) }
+        finishJob(batchId, TransferStatus.FAILED, message)
     }
 
     override fun onFileFailed(batchId: String, fileId: String, reason: String) {
@@ -334,6 +669,8 @@ class TransferEngine(
     fun cancel(jobId: String) {
         MeshLog.i(TAG, "Cancelling $jobId")
         cancelled += jobId
+        synchronized(queueLock) { pendingSends.remove(jobId) }
+        pumpQueue()
         server.forget(jobId)
         reject(jobId)
         finishJob(jobId, TransferStatus.CANCELLED, "Cancelled")
@@ -372,12 +709,17 @@ class TransferEngine(
         status: TransferStatus,
         message: String? = null,
         localUri: String? = null,
+        name: String? = null,
     ) {
         updateJob(jobId, force = status.isFinished) { job ->
             job.copy(
                 files = job.files.map { file ->
                     if (file.id != fileId) file
-                    else file.copy(status = status, localUri = localUri ?: file.localUri)
+                    else file.copy(
+                        status = status,
+                        localUri = localUri ?: file.localUri,
+                        name = name?.takeIf { it.isNotBlank() } ?: file.name,
+                    )
                 },
                 message = message ?: job.message,
             )
@@ -398,6 +740,9 @@ class TransferEngine(
 
     private fun finishJob(jobId: String, status: TransferStatus, message: String?) {
         speedTracker.forget(jobId)
+        // A slot freed up: whatever was waiting behind this one can go.
+        synchronized(queueLock) { pendingSends.remove(jobId) }
+        pumpQueue()
         updateJob(jobId, force = true) { job ->
             job.copy(
                 status = status,
@@ -407,6 +752,9 @@ class TransferEngine(
             )
         }
         MeshLog.i(TAG, "Job $jobId finished: $status ${message ?: ""}")
+        // Recorded here rather than by the caller: every terminal path goes through this
+        // function, so there is no way to finish a transfer without logging it.
+        job(jobId)?.let { finished -> log.record(finished, securityFor(jobId)) }
     }
 
     /**
@@ -453,6 +801,9 @@ class TransferEngine(
     }
 
     companion object {
+        /** How often a running transfer is checked for a dead route. */
+        private const val CHECK_INTERVAL_MILLIS = 1_000L
+
         const val TAG = "TransferEngine"
         private const val UI_UPDATE_INTERVAL_MS = 100L
         private const val SAMPLE_WINDOW_MS = 400L
