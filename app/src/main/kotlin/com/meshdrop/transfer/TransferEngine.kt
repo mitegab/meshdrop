@@ -9,6 +9,10 @@ import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.model.TransferJob
 import com.meshdrop.core.model.SecurityState
 import com.meshdrop.core.model.TransferStatus
+import com.meshdrop.core.queue.QueuePlan
+import com.meshdrop.core.queue.QueuedTransfer
+import com.meshdrop.core.queue.RunningTransfer
+import com.meshdrop.core.queue.TransferScheduler
 import com.meshdrop.core.offer.OfferPolicy
 import com.meshdrop.core.offer.OfferWindow
 import com.meshdrop.core.storage.SpaceGuard
@@ -73,6 +77,24 @@ class TransferEngine(
 ) : IncomingTransferHandler {
 
     private val client = TransferClient(documentRepository, fileSpooler)
+
+    /** A send waiting for a slot on the radio. */
+    private class PendingSend(
+        val queued: QueuedTransfer,
+        val peer: PeerDevice,
+        val files: List<TransferFile>,
+    )
+
+    /** Guarded by [queueLock]: pumped from the send path, from job completion and from cancel. */
+    private val pendingSends = LinkedHashMap<String, PendingSend>()
+    private val queueLock = Any()
+
+    private val _queuePlan = MutableStateFlow(
+        QueuePlan(start = emptyList(), waiting = emptyList(), limitReached = false),
+    )
+
+    /** What the scheduler decided last, for the "N jobs waiting" line. */
+    val queuePlan: StateFlow<QueuePlan> = _queuePlan.asStateFlow()
 
     /** Ephemeral ECDH + AES-256-GCM sessions, one per batch. */
     private val negotiator = SessionNegotiator(identity, trustedPeers)
@@ -161,8 +183,39 @@ class TransferEngine(
         }
         MeshLog.i(TAG, "Queued send job $jobId (${job.totalBytes} bytes → ${peer.name})")
 
-        scope.launch(Dispatchers.IO) { runSendJob(jobId, peer, files) }
+        enqueue(PendingSend(QueuedTransfer(jobId, peer.id, job.totalBytes, now()), peer, files))
         jobId
+    }
+
+    /**
+     * "3rd in line" — null when the job is already moving or is not queued at all.
+     *
+     * Wi-Fi is one radio: five batches at once do not finish sooner than two, and each of
+     * the five progress bars would be showing a fifth of the real speed as if it were the
+     * whole thing. Queuing costs a wait that can be *shown*; not queuing costs honesty.
+     */
+    fun queueLabelFor(jobId: String): String? = _queuePlan.value.labelFor(jobId)
+
+    fun enqueue(pending: PendingSend) {
+        synchronized(queueLock) { pendingSends[pending.queued.jobId] = pending }
+        pumpQueue()
+    }
+
+    /** Starts whatever the scheduler says may go now, and leaves the rest waiting. */
+    private fun pumpQueue() {
+        val start = synchronized(queueLock) {
+            val running = _jobs.value
+                .filter { it.direction == TransferDirection.SEND && it.status == TransferStatus.IN_PROGRESS }
+                .map { RunningTransfer(it.id, it.peerId, it.bytesTransferred, it.totalBytes) }
+            val waiting = pendingSends.values.map { it.queued }
+            val plan = TransferScheduler.schedule(running, waiting)
+            _queuePlan.value = plan
+            plan.start.mapNotNull { pendingSends.remove(it.jobId) }
+        }
+        start.forEach { pending ->
+            MeshLog.i(TAG, "Starting queued send ${pending.queued.jobId}")
+            scope.launch(Dispatchers.IO) { runSendJob(pending.queued.jobId, pending.peer, pending.files) }
+        }
     }
 
     private suspend fun runSendJob(jobId: String, peer: PeerDevice, files: List<TransferFile>) {
@@ -408,6 +461,8 @@ class TransferEngine(
     fun cancel(jobId: String) {
         MeshLog.i(TAG, "Cancelling $jobId")
         cancelled += jobId
+        synchronized(queueLock) { pendingSends.remove(jobId) }
+        pumpQueue()
         server.forget(jobId)
         reject(jobId)
         finishJob(jobId, TransferStatus.CANCELLED, "Cancelled")
@@ -477,6 +532,9 @@ class TransferEngine(
 
     private fun finishJob(jobId: String, status: TransferStatus, message: String?) {
         speedTracker.forget(jobId)
+        // A slot freed up: whatever was waiting behind this one can go.
+        synchronized(queueLock) { pendingSends.remove(jobId) }
+        pumpQueue()
         updateJob(jobId, force = true) { job ->
             job.copy(
                 status = status,

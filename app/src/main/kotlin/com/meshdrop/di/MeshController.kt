@@ -48,6 +48,12 @@ class MeshController(
         selectedPeer = peer
     }
 
+    /** "Next in line" / "3rd in line" for a send that is waiting for a slot; null when it is moving. */
+    fun queueLabelFor(jobId: String): String? = engine.queueLabelFor(jobId)
+
+    /** "2 jobs waiting · next in about 12s" for the send screen header. */
+    val queuePlan get() = engine.queuePlan
+
     /** TCP port we accept transfers on, or 0 while the receiver is off. */
     val localPort: Int get() = engine.localPort
 
