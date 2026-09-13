@@ -53,7 +53,41 @@ object Smoothing {
         return candidate
     }
 
+    /**
+     * How steady a series of throughput samples is, from 0 (wild) to 1 (flat line).
+     *
+     * One minus the coefficient of variation, clamped. It exists because "12 MB/s" and
+     * "12 MB/s but it has been 3 MB/s twice in the last second" are different facts, and
+     * the transfer card should be able to say the second one without a second number:
+     * an unsteady link is why the ETA keeps moving.
+     */
+    fun stability(samples: List<Long>): Double {
+        if (samples.size < 2) return 1.0
+        val mean = samples.average()
+        if (mean <= 0.0) return 0.0
+        val variance = samples.sumOf { (it - mean) * (it - mean) } / samples.size
+        val deviation = kotlin.math.sqrt(variance)
+        return (1.0 - deviation / mean).coerceIn(0.0, 1.0)
+    }
+
+    /**
+     * True when every sample in the window is below [minimum]: the link is up and
+     * producing nothing, which is the state that needs a failover rather than a spinner.
+     *
+     * A full window is required so the first second of a transfer is not called a stall.
+     */
+    fun stalled(samples: List<Long>, minimum: Long = STALL_RATE, window: Int = STALL_WINDOW): Boolean {
+        if (samples.size < window) return false
+        return samples.takeLast(window).all { it < minimum }
+    }
+
     const val DEFAULT_ALPHA = 0.25
+
+    /** Below this, a lane is producing nothing useful. Matches LaneFailover's crawl floor. */
+    const val STALL_RATE = 32L * 1024
+
+    /** Roughly the last two seconds at the UI's ~10 updates a second. */
+    const val STALL_WINDOW = 20
 }
 
 /** Stateful wrapper around [Smoothing.ema] for callers that hold onto a value. */
@@ -103,8 +137,20 @@ class TransferTelemetry(
         val quantised = Smoothing.quantise(smoothed)
         history.add(quantised.toLong())
         stableEta = Smoothing.stableEta(stableEta, etaMillis)
-        return SmoothedReading(bytesPerSecond = quantised.toLong(), etaMillis = stableEta)
+        val samples = history.recent()
+        return SmoothedReading(
+            bytesPerSecond = quantised.toLong(),
+            etaMillis = stableEta,
+            stability = Smoothing.stability(samples),
+            stalled = Smoothing.stalled(samples),
+        )
     }
+
+    /** 0..1, how flat the recent throughput has been. */
+    fun stability(): Double = Smoothing.stability(history.recent())
+
+    /** True when the link has been producing nothing useful for the whole stall window. */
+    fun stalled(): Boolean = Smoothing.stalled(history.recent())
 
     /** Oldest → newest samples for the throughput graph. */
     fun samples(): List<Long> = history.snapshot()
@@ -122,4 +168,17 @@ class TransferTelemetry(
 data class SmoothedReading(
     val bytesPerSecond: Long,
     val etaMillis: Long?,
-)
+    /** 0..1; below [UNSTEADY] the ETA line is allowed to hedge ("about"). */
+    val stability: Double = 1.0,
+    /** True when nothing useful has moved for the stall window. */
+    val stalled: Boolean = false,
+) {
+    /** Below this the readout is a guess and should not be presented as a promise. */
+    val isSteady: Boolean get() = stability >= UNSTEADY
+
+    companion object {
+        const val UNSTEADY = 0.6
+
+        val IDLE = SmoothedReading(bytesPerSecond = 0L, etaMillis = null)
+    }
+}

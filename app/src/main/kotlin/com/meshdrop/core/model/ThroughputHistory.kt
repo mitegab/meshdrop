@@ -27,6 +27,16 @@ class ThroughputHistory(private val capacity: Int = DEFAULT_CAPACITY) {
         return result
     }
 
+    /**
+     * The samples actually collected, oldest → newest, with no zero padding.
+     *
+     * [snapshot] pads so the graph does not slide around while it fills up; anything doing
+     * arithmetic on the series wants the truth instead, or a transfer looks unstable for
+     * its first two seconds.
+     */
+    fun recent(limit: Int = Int.MAX_VALUE): List<Long> =
+        if (limit >= samples.size) samples.toList() else samples.takeLast(limit)
+
     /** Peak of the window, with a floor so an idle graph does not divide by zero. */
     fun peak(minimum: Long = MINIMUM_PEAK): Long =
         (samples.maxOrNull() ?: 0L).coerceAtLeast(minimum)
