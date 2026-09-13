@@ -83,7 +83,18 @@ class TransferEngine(
         val queued: QueuedTransfer,
         val peer: PeerDevice,
         val files: List<TransferFile>,
+        /** True for a retry: ask the receiver what it already holds before sending. */
+        val resume: Boolean = false,
     )
+
+    /**
+     * The peer each sent batch was addressed to, so a retry has somewhere to go.
+     *
+     * A [TransferJob] keeps the peer's name and id for display; it deliberately does not
+     * keep the address, which goes stale as peers roam. The retry needs a live endpoint, so
+     * the last known [PeerDevice] is kept here and re-resolved if it has moved.
+     */
+    private val batchPeers = ConcurrentHashMap<String, PeerDevice>()
 
     /** Guarded by [queueLock]: pumped from the send path, from job completion and from cancel. */
     private val pendingSends = LinkedHashMap<String, PendingSend>()
@@ -183,8 +194,56 @@ class TransferEngine(
         }
         MeshLog.i(TAG, "Queued send job $jobId (${job.totalBytes} bytes → ${peer.name})")
 
+        batchPeers[jobId] = peer
         enqueue(PendingSend(QueuedTransfer(jobId, peer.id, job.totalBytes, now()), peer, files))
         jobId
+    }
+
+    /**
+     * Sends again, and only what is missing.
+     *
+     * A batch of ten that dropped on number nine used to mean picking all ten again. The
+     * batch id is reused on purpose: the receiver still holds the nine that landed (feature
+     * 24), so [TransferClient.send] with `resume = true` asks what it has and skips them,
+     * and the user watches one file move instead of ten.
+     *
+     * @return false when there is nothing to retry — not a send job, no files missing, or
+     *         the peer is no longer known.
+     */
+    fun retry(jobId: String): Boolean {
+        val job = _jobs.value.firstOrNull { it.id == jobId } ?: return false
+        if (job.direction != TransferDirection.SEND) return false
+        val peer = batchPeers[jobId] ?: return false
+        val missing = job.files.filter { it.status != TransferStatus.COMPLETED }
+        if (missing.isEmpty()) return false
+
+        MeshLog.i(TAG, "Retrying ${missing.size}/${job.files.size} file(s) of $jobId → ${peer.name}")
+        cancelled -= jobId
+        _jobs.update { list ->
+            list.map { existing ->
+                if (existing.id != jobId) existing else existing.copy(
+                    status = TransferStatus.WAITING,
+                    message = null,
+                    finishedAtMillis = null,
+                    bytesPerSecond = 0L,
+                    files = existing.files.map { file ->
+                        if (file.status == TransferStatus.COMPLETED) file else file.copy(
+                            status = TransferStatus.WAITING,
+                            message = null,
+                            bytesTransferred = 0L,
+                        )
+                    },
+                )
+            }
+        }
+        // The crypto session died with the connection; a fresh one is negotiated for the
+        // retry rather than reusing keys the peer has already discarded.
+        batchCrypto.remove(jobId)
+        if (encryptionEnabled()) {
+            batchCrypto[jobId] = BatchCrypto(negotiator, EndpointRole.SENDER)
+        }
+        enqueue(PendingSend(QueuedTransfer(jobId, peer.id, job.totalBytes, now()), peer, missing, resume = true))
+        return true
     }
 
     /**
@@ -214,11 +273,18 @@ class TransferEngine(
         }
         start.forEach { pending ->
             MeshLog.i(TAG, "Starting queued send ${pending.queued.jobId}")
-            scope.launch(Dispatchers.IO) { runSendJob(pending.queued.jobId, pending.peer, pending.files) }
+            scope.launch(Dispatchers.IO) {
+                runSendJob(pending.queued.jobId, pending.peer, pending.files, pending.resume)
+            }
         }
     }
 
-    private suspend fun runSendJob(jobId: String, peer: PeerDevice, files: List<TransferFile>) {
+    private suspend fun runSendJob(
+        jobId: String,
+        peer: PeerDevice,
+        files: List<TransferFile>,
+        resume: Boolean = false,
+    ) {
         updateJob(jobId, force = true) { it.copy(status = TransferStatus.IN_PROGRESS) }
 
         val outcome: SendOutcome = try {
@@ -229,6 +295,7 @@ class TransferEngine(
                 senderName = localDeviceName(),
                 files = files,
                 crypto = batchCrypto[jobId],
+                resume = resume,
                 isCancelled = { jobId in cancelled },
                 onFileStarted = { fileId -> setFileStatus(jobId, fileId, TransferStatus.IN_PROGRESS) },
                 onFileProgress = { fileId, bytesSent, sizeBytes, bytesPerSecond ->

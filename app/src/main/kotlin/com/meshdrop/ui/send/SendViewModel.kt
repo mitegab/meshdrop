@@ -213,6 +213,20 @@ class SendViewModel(
         _uiState.update { it.copy(activeJobId = null, isSending = false) }
     }
 
+    /**
+     * Sends again, and only the files that did not make it.
+     *
+     * Keeps the same job, so the card the user was reading turns back into a progress bar
+     * rather than a second card appearing below it.
+     */
+    fun retry(batchId: String) {
+        if (!controller.retry(batchId)) {
+            _uiState.update { it.copy(error = "Nothing left to send in that batch") }
+            return
+        }
+        _uiState.update { it.copy(activeJobId = batchId, lastResult = null, finishedJobId = null, isSending = true) }
+    }
+
     fun dismissResult() = _uiState.update { it.copy(lastResult = null, finishedJobId = null) }
     fun consumeError() = _uiState.update { it.copy(error = null) }
     fun toggleTrustExpanded() = _uiState.update { it.copy(trustExpanded = !it.trustExpanded) }

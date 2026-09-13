@@ -29,6 +29,8 @@ fun TransferFinishedCard(
     state: TransferSessionState.Finished,
     onDone: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Non-null adds a "Try again" button — only a send with files still missing gets one. */
+    onRetry: (() -> Unit)? = null,
 ) {
     val ok = state.status == TransferStatus.COMPLETED
     val sending = state.direction == TransferDirection.SEND
@@ -97,7 +99,12 @@ fun TransferFinishedCard(
                 )
             }
 
-            TextButton(onClick = onDone) { Text("Done") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (onRetry != null && !ok && state.status != TransferStatus.REJECTED) {
+                    TextButton(onClick = onRetry) { Text("Try again") }
+                }
+                TextButton(onClick = onDone) { Text("Done") }
+            }
         }
     }
 }

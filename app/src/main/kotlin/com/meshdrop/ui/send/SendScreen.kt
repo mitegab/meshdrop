@@ -56,7 +56,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meshdrop.core.model.PeerDevice
+import com.meshdrop.core.model.TransferDirection
 import com.meshdrop.core.model.TransferFile
+import com.meshdrop.core.model.TransferStatus
 import com.meshdrop.core.util.Format
 import com.meshdrop.transfer.state.TransferSessionState
 import com.meshdrop.ui.components.ActiveTransferPanel
@@ -230,9 +232,17 @@ fun SendScreen(
                     }
 
                     is TransferSessionState.Finished -> {
+                        val missing = state.files.count { it.status != TransferStatus.COMPLETED }
                         TransferFinishedCard(
                             state = state,
                             onDone = viewModel::dismissResult,
+                            // A retry only makes sense for something we were sending, and
+                            // only when at least one file is still missing.
+                            onRetry = if (state.direction == TransferDirection.SEND && missing > 0) {
+                                { viewModel.retry(state.batchId) }
+                            } else {
+                                null
+                            },
                             modifier = Modifier.padding(horizontal = 20.dp),
                         )
                     }
@@ -399,7 +409,7 @@ private fun FileRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (file.status != com.meshdrop.core.model.TransferStatus.WAITING) {
+            if (file.status != TransferStatus.WAITING) {
                 StatusChip(status = file.status)
                 Spacer(modifier = Modifier.width(8.dp))
             }

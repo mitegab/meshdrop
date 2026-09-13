@@ -150,6 +150,9 @@ class MeshController(
 
     fun securityFor(batchId: String) = engine.securityFor(batchId)
 
+    /** Sends the files that did not make it again. False when there is nothing to retry. */
+    fun retry(jobId: String): Boolean = engine.retry(jobId)
+
     fun reject(batchId: String) = engine.reject(batchId)
 
     fun cancel(jobId: String) = engine.cancel(jobId)
