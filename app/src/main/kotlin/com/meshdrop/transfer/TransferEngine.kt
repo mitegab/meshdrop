@@ -13,6 +13,9 @@ import com.meshdrop.core.log.TransferLogEntry
 import com.meshdrop.core.log.TransferLogSink
 import com.meshdrop.core.log.TransferLogStore
 import com.meshdrop.core.model.TransferStatus
+import com.meshdrop.core.model.TransportLane
+import com.meshdrop.core.model.lane
+import com.meshdrop.core.transport.LaneFailover
 import com.meshdrop.core.queue.QueuePlan
 import com.meshdrop.core.queue.QueuedTransfer
 import com.meshdrop.core.queue.RunningTransfer
@@ -317,6 +320,11 @@ class TransferEngine(
     ) {
         updateJob(jobId, force = true) { it.copy(status = TransferStatus.IN_PROGRESS) }
 
+        // Watched separately from the transfer: the copy loop only reports while bytes move,
+        // and the case we care about is precisely the one where they stop.
+        val watcher = LaneWatcher(jobId, peer.kind.lane, now())
+        val watchJob = scope.launch { watcher.run() }
+
         val outcome: SendOutcome = try {
             client.send(
                 peer = peer,
@@ -330,6 +338,7 @@ class TransferEngine(
                 onFileStarted = { fileId -> setFileStatus(jobId, fileId, TransferStatus.IN_PROGRESS) },
                 onFileProgress = { fileId, bytesSent, sizeBytes, bytesPerSecond ->
                     reportSendProgress(jobId, fileId, bytesSent, sizeBytes, bytesPerSecond)
+                    watcher.noteProgress(bytesPerSecond)
                 },
                 onFileFinished = { fileId, success, message ->
                     setFileStatus(
@@ -344,6 +353,21 @@ class TransferEngine(
             MeshLog.e(TAG, "Send job $jobId crashed", error)
             finishJob(jobId, TransferStatus.FAILED, error.message)
             return
+        } finally {
+            watchJob.cancel()
+            laneWatchers.remove(jobId)
+        }
+
+        // The watcher gave up on the route and closed the socket. Everything that landed is
+        // still on the receiver, so the honest move is to try another way to the same device
+        // rather than reporting a failure the user cannot do anything about.
+        if (watcher.failedOver && jobId !in cancelled) {
+            val remaining = _jobs.value.firstOrNull { it.id == jobId }
+                ?.files?.filter { it.status != TransferStatus.COMPLETED }
+                ?: emptyList()
+            if (remaining.isNotEmpty() && reroute(jobId, peer, watcher)) {
+                return
+            }
         }
 
         recordSecurity(jobId)
@@ -362,6 +386,93 @@ class TransferEngine(
             else -> finishJob(jobId, TransferStatus.COMPLETED, null)
         }
     }
+
+    /** Per-job failover state, so the watcher can outlive one progress callback. */
+    private val laneWatchers = ConcurrentHashMap<String, LaneWatcher>()
+
+    /**
+     * Decides when the pipe we are on has gone bad.
+     *
+     * Thresholds come from [LaneFailover]; this class only keeps the clocks those rules need
+     * (last progress, how long we have been crawling) and pulls the trigger.
+     */
+    private inner class LaneWatcher(
+        private val jobId: String,
+        private val lane: TransportLane,
+        startedAtMillis: Long,
+    ) {
+        @Volatile private var lastProgressMillis = startedAtMillis
+        @Volatile private var bytesPerSecond = 0L
+        @Volatile private var slowSinceMillis: Long? = null
+
+        /** Set when we closed the socket because the route stopped working. */
+        @Volatile var failedOver = false
+            private set
+
+        fun noteProgress(rate: Long) {
+            bytesPerSecond = rate
+            if (rate > 0L) lastProgressMillis = now()
+            slowSinceMillis = if (LaneFailover.isCrawling(rate)) slowSinceMillis ?: now() else null
+        }
+
+        suspend fun run() {
+            while (true) {
+                kotlinx.coroutines.delay(CHECK_INTERVAL_MILLIS)
+                if (failedOver) return
+                val decision = LaneFailover.decide(
+                    current = lane,
+                    lastProgressMillis = lastProgressMillis,
+                    bytesPerSecond = bytesPerSecond,
+                    nowMillis = now(),
+                    candidates = alternativeRoutes(peerIdOf(jobId)).map { it.kind.lane }.distinct(),
+                    slowSinceMillis = slowSinceMillis,
+                )
+                if (!decision.failedOver) continue
+                failedOver = true
+                MeshLog.w(TAG, "$jobId: giving up on ${lane.label} (${decision.reason})")
+                client.abort(jobId)
+                return
+            }
+        }
+    }
+
+    /**
+     * Moves a stalled transfer onto another route to the same device and picks up where it
+     * stopped. Returns false when there is nowhere else to go, so the caller can fail the
+     * job honestly instead of silently doing nothing.
+     */
+    private fun reroute(jobId: String, from: PeerDevice, watcher: LaneWatcher): Boolean {
+        val alternative = alternativeRoutes(from.id)
+            .firstOrNull { it.host != from.host || it.port != from.port }
+            ?: run {
+                MeshLog.w(TAG, "$jobId: no other route to ${from.name}")
+                return false
+            }
+        val lane = alternative.kind.lane
+        MeshLog.i(TAG, "$jobId: switching to ${alternative.endpoint} (${lane.label})")
+        updateJob(jobId, force = true) { job ->
+            job.copy(
+                lane = lane,
+                previousLanes = job.previousLanes + job.lane,
+                laneChangedAtMillis = now(),
+                message = "Switched to ${lane.label}",
+            )
+        }
+        batchPeers[jobId] = alternative
+        // The batch id is reused, so the receiver keeps what landed and the retry sends the rest.
+        enqueue(
+            PendingSend(
+                QueuedTransfer(jobId, alternative.id, job(jobId)?.totalBytes ?: 0L, now()),
+                alternative,
+                _jobs.value.firstOrNull { it.id == jobId }?.files
+                    ?.filter { it.status != TransferStatus.COMPLETED } ?: emptyList(),
+                resume = true,
+            ),
+        )
+        return true
+    }
+
+    private fun peerIdOf(jobId: String): String = _jobs.value.firstOrNull { it.id == jobId }?.peerId ?: ""
 
     private fun reportSendProgress(
         jobId: String,
@@ -690,6 +801,9 @@ class TransferEngine(
     }
 
     companion object {
+        /** How often a running transfer is checked for a dead route. */
+        private const val CHECK_INTERVAL_MILLIS = 1_000L
+
         const val TAG = "TransferEngine"
         private const val UI_UPDATE_INTERVAL_MS = 100L
         private const val SAMPLE_WINDOW_MS = 400L

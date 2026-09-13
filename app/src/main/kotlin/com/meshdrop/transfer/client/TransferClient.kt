@@ -381,6 +381,24 @@ class TransferClient(
 
     // region helpers ----------------------------------------------------------------------
 
+    /**
+     * Sockets currently in use by a batch, so a stalled transfer can be abandoned.
+     *
+     * The copy loop only notices cancellation between files, and a transfer that has stalled
+     * is stalled *inside* a file: the socket is open, no bytes are moving, and nothing will
+     * change until the read times out on its own. Closing the socket is what turns "wait two
+     * minutes" into "fail over now".
+     */
+    private val openSockets = ConcurrentHashMap<String, Socket>()
+
+    /** Closes the connection a batch is using. The in-flight upload fails; the caller decides what that means. */
+    fun abort(batchId: String) {
+        openSockets.remove(batchId)?.let { socket ->
+            runCatching { socket.close() }
+            MeshLog.i(TAG, "$batchId: connection closed to abandon the lane")
+        }
+    }
+
     private fun connect(peer: PeerDevice): Socket {
         val socket = Socket()
         socket.tcpNoDelay = true

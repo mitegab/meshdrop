@@ -61,6 +61,7 @@ class AppContainer(val application: Application) {
         encryptionEnabled = { userPreferences.encryptionEnabled.value },
         storageVolume = { storageVolume() },
         logSink = transferLogFile,
+        alternativeRoutes = { deviceId -> meshController.alternativeRoutes(deviceId) },
     )
 
     /**

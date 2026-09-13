@@ -60,6 +60,12 @@ data class TransferJob(
     val bytesPerSecond: Long = 0L,
     val status: TransferStatus = TransferStatus.WAITING,
     val message: String? = null,
+    /** The pipe carrying the transfer right now. */
+    val lane: TransportLane = TransportLane.WIFI_LAN,
+    /** Pipes this transfer already gave up on, oldest first — the route line draws them. */
+    val previousLanes: List<TransportLane> = emptyList(),
+    /** When the last switch happened, so the UI can animate it and then stop. */
+    val laneChangedAtMillis: Long? = null,
     val startedAtMillis: Long = System.currentTimeMillis(),
     val finishedAtMillis: Long? = null,
     /** How many times the user has asked for this batch to be tried again. */

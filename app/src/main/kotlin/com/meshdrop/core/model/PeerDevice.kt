@@ -17,6 +17,20 @@ enum class DiscoveryKind(val label: String) {
 }
 
 /**
+ * Which transport a discovery kind actually rides.
+ *
+ * Two kinds can be the same lane: mDNS and the UDP beacon both describe "on the Wi-Fi
+ * network", so failing over from one to the other is not a failover at all — it is the same
+ * pipe with a different way of finding it.
+ */
+val DiscoveryKind.lane: TransportLane
+    get() = when (this) {
+        DiscoveryKind.LAN_NSD, DiscoveryKind.LAN_BEACON -> TransportLane.WIFI_LAN
+        DiscoveryKind.WIFI_DIRECT -> TransportLane.WIFI_DIRECT
+        DiscoveryKind.BLUETOOTH -> TransportLane.BLUETOOTH
+    }
+
+/**
  * A nearby device we can send files to.
  *
  * @param id Stable identity advertised by the peer. The same physical device may be reported

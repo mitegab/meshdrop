@@ -77,6 +77,16 @@ class MeshController(
         selectedPeer = peer
     }
 
+    /**
+     * Other ways to reach the same device, best first.
+     *
+     * Used when a transfer stalls: the route we picked may be the one that is broken, and
+     * discovery usually knows a second address for the same device.
+     */
+    fun alternativeRoutes(deviceId: String): List<PeerDevice> = discovery.routes.value
+        .filter { it.id == deviceId }
+        .sortedByDescending { it.lastSeenMillis }
+
     /** Every finished transfer, newest first, surviving restarts. */
     fun loggedTransfers() = engine.loggedTransfers()
 
