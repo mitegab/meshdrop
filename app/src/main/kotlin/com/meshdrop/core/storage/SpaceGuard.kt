@@ -2,6 +2,25 @@ package com.meshdrop.core.storage
 
 import com.meshdrop.core.util.Format
 
+/**
+ * One volume as the platform reports it.
+ *
+ * Wrapped so callers hand [SpaceGuard] something that says what it is, rather than two
+ * unlabelled Longs that are easy to pass the wrong way round - swapping them silently turns
+ * "4 GB free of 64 GB" into "64 GB free of 4 GB", which reads as plenty of room.
+ */
+data class VolumeSpace(
+    val freeBytes: Long,
+    val totalBytes: Long = 0L,
+) {
+    /** A platform call that returned nothing usable. Treated as "unknown", never as "full". */
+    val isUnknown: Boolean get() = freeBytes <= 0L
+
+    companion object {
+        val UNKNOWN = VolumeSpace(0L, 0L)
+    }
+}
+
 /** What the free-space check concluded. */
 enum class SpaceVerdict {
     /** Comfortable: the batch and the headroom both fit. */
@@ -100,11 +119,32 @@ object SpaceGuard {
         )
     }
 
-    /** Convenience for the common case: a batch of [batchBytes] onto a volume with [freeBytes]. */
+    /**
+     * Convenience for the common case: a batch of [batchBytes] onto a volume with [freeBytes].
+     *
+     * A [VolumeSpace.UNKNOWN] volume - free and total both zero, i.e. the platform did not
+     * answer - responds [SpaceVerdict.ENOUGH]: a platform that will not report its free space
+     * is not a reason to refuse a transfer. A negative report is not unknown, it is wrong, and
+     * is still treated as zero bytes free.
+     */
     fun forBatch(
         batchBytes: Long,
         freeBytes: Long,
         totalBytes: Long = 0L,
         spooled: Boolean = false,
-    ): SpaceCheck = check(requiredFor(batchBytes, spooled), freeBytes, totalBytes)
+    ): SpaceCheck = if (freeBytes == 0L && totalBytes == 0L) {
+        // Exactly the "the platform did not answer" reading (see VolumeSpace.UNKNOWN). A
+        // *negative* report is a different thing: that is a reading we did not understand,
+        // and it still goes through the normal path and comes out NOT_ENOUGH.
+        SpaceCheck(SpaceVerdict.ENOUGH, requiredFor(batchBytes, spooled), 0L, 0L)
+    } else {
+        check(requiredFor(batchBytes, spooled), freeBytes, totalBytes)
+    }
+
+    /** Same check against a platform-reported [volume]. */
+    fun forVolume(
+        batchBytes: Long,
+        volume: VolumeSpace,
+        spooled: Boolean = false,
+    ): SpaceCheck = forBatch(batchBytes, volume.freeBytes, volume.totalBytes, spooled)
 }

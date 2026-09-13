@@ -78,6 +78,26 @@ class SpaceGuardTest {
     }
 
     @Test
+    fun `a volume the platform would not report does not refuse the transfer`() {
+        val check = SpaceGuard.forVolume(batchBytes = 4 * gb, volume = VolumeSpace.UNKNOWN, spooled = true)
+
+        assertEquals(SpaceVerdict.ENOUGH, check.verdict)
+        assertTrue(VolumeSpace.UNKNOWN.isUnknown)
+        assertEquals(8 * gb, check.requiredBytes)
+    }
+
+    @Test
+    fun `a real volume is measured, headroom and all`() {
+        val tight = SpaceGuard.forVolume(1 * gb, VolumeSpace(freeBytes = 1 * gb + 100 * mb, totalBytes = 64 * gb))
+        assertEquals(SpaceVerdict.TIGHT, tight.verdict)
+        assertFalse(VolumeSpace(freeBytes = 1 * gb).isUnknown)
+
+        val full = SpaceGuard.forVolume(9 * gb, VolumeSpace(freeBytes = 1 * gb, totalBytes = 8 * gb))
+        assertEquals(SpaceVerdict.NOT_ENOUGH, full.verdict)
+        assertFalse(full.fits)
+    }
+
+    @Test
     fun `a negative free space report is treated as zero`() {
         val check = SpaceGuard.forBatch(batchBytes = 1 * mb, freeBytes = -1L)
 

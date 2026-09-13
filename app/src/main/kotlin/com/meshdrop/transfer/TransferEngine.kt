@@ -9,6 +9,9 @@ import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.model.TransferJob
 import com.meshdrop.core.model.SecurityState
 import com.meshdrop.core.model.TransferStatus
+import com.meshdrop.core.storage.SpaceGuard
+import com.meshdrop.core.storage.VolumeSpace
+import com.meshdrop.core.storage.SpaceVerdict
 import com.meshdrop.core.util.MeshLog
 import com.meshdrop.data.DocumentRepository
 import com.meshdrop.data.FileSpooler
@@ -57,6 +60,12 @@ class TransferEngine(
     private val localDeviceName: () -> String,
     /** Read live from settings: switching encryption off affects the next transfer. */
     private val encryptionEnabled: () -> Boolean = { true },
+    /**
+     * The volume incoming files land on. Read per transfer rather than once at startup: free
+     * space changes while the app is open, and a stale reading is how a check ends up
+     * approving something that no longer fits.
+     */
+    private val storageVolume: () -> VolumeSpace = { VolumeSpace.UNKNOWN },
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : IncomingTransferHandler {
 
@@ -131,6 +140,17 @@ class TransferEngine(
             startedAtMillis = now(),
         )
         _jobs.update { list -> list + job }
+
+        // Files with an unknown size get spooled to our own cache first, which needs room for
+        // a second copy. Checking before the first byte beats explaining a half-sent video.
+        val spools = files.any { it.sizeBytes <= 0L }
+        val space = SpaceGuard.forVolume(job.totalBytes, storageVolume(), spooled = spools)
+        if (!space.fits) {
+            MeshLog.w(TAG, "Job $jobId refused: ${space.message}")
+            finishJob(jobId, TransferStatus.FAILED, space.message)
+            return@withContext jobId
+        }
+
         // No crypto object at all when encryption is switched off: the client then sends a
         // handshake with no security block, and the peer shows "Not encrypted".
         if (encryptionEnabled()) {
@@ -217,9 +237,36 @@ class TransferEngine(
     // region receiving --------------------------------------------------------------------
 
     override suspend fun requestApproval(request: IncomingRequest): Boolean {
+        // Receiving is where a full disk actually bites: the sender has already spent the
+        // time and the only honest outcome is a truncated file. Spooled = true because a
+        // file of unknown size is written to a scratch directory before it is published.
+        val space = SpaceGuard.forVolume(request.totalBytes, storageVolume(), spooled = true)
+        if (space.verdict == SpaceVerdict.NOT_ENOUGH) {
+            val reason = space.message ?: "Not enough space"
+            MeshLog.w(TAG, "Declining ${request.batchId}: $reason")
+            _jobs.update { list ->
+                list + TransferJob(
+                    id = request.batchId,
+                    direction = TransferDirection.RECEIVE,
+                    peerName = request.senderName,
+                    peerId = request.senderId,
+                    files = request.files.map { it.copy(status = TransferStatus.FAILED) },
+                    totalBytes = request.totalBytes,
+                    status = TransferStatus.FAILED,
+                    message = reason,
+                    startedAtMillis = now(),
+                    finishedAtMillis = now(),
+                )
+            }
+            return false
+        }
+
         val decision = CompletableDeferred<Boolean>()
         pendingDecisions[request.batchId] = decision
-        _incoming.update { list -> list.filterNot { it.batchId == request.batchId } + request }
+        _incoming.update { list ->
+            list.filterNot { it.batchId == request.batchId } +
+                if (space.verdict == SpaceVerdict.TIGHT) request.copy(spaceWarning = space.message) else request
+        }
         MeshLog.i(TAG, "Incoming batch ${request.batchId} from ${request.senderName}")
 
         val accepted = try {

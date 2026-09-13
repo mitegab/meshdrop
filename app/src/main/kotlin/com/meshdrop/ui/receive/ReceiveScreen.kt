@@ -299,6 +299,14 @@ private fun OfferCard(
                 )
             }
 
+            if (state.spaceWarning != null) {
+                Text(
+                    text = state.spaceWarning,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
             TrustIndicator(
                 security = state.security,
                 peerName = state.peerName,

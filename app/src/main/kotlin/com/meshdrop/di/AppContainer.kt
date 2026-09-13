@@ -1,7 +1,9 @@
 package com.meshdrop.di
 
 import android.app.Application
+import android.os.StatFs
 import com.meshdrop.core.prefs.UserPreferences
+import com.meshdrop.core.storage.VolumeSpace
 import com.meshdrop.data.DocumentRepository
 import com.meshdrop.data.VaultStore
 import com.meshdrop.data.FileSpooler
@@ -53,7 +55,19 @@ class AppContainer(val application: Application) {
         localDeviceId = userPreferences.deviceId,
         localDeviceName = { userPreferences.deviceName.value },
         encryptionEnabled = { userPreferences.encryptionEnabled.value },
+        storageVolume = { storageVolume() },
     )
+
+    /**
+     * Free space on the volume incoming files land on, read at call time.
+     *
+     * Falls back to [VolumeSpace.UNKNOWN] rather than 0: a platform that will not answer is
+     * not evidence the disk is full, and reporting 0 would refuse every transfer.
+     */
+    private fun storageVolume(): VolumeSpace = runCatching {
+        val path = application.getExternalFilesDir(null) ?: application.filesDir
+        StatFs(path.absolutePath).let { VolumeSpace(it.availableBytes, it.totalBytes) }
+    }.getOrElse { VolumeSpace.UNKNOWN }
 
     /**
      * Every way we know how to find a peer.

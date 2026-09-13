@@ -127,4 +127,9 @@ data class IncomingRequest(
     val files: List<TransferFile>,
     val totalBytes: Long,
     val arrivedAtMillis: Long = System.currentTimeMillis(),
+    /**
+     * Set when this batch fits but eats the headroom. The offer is still shown - it is the
+     * user's phone and the user's call - but they get told before they tap Accept.
+     */
+    val spaceWarning: String? = null,
 )

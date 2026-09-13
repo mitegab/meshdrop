@@ -92,6 +92,7 @@ object TransferSessionMapper {
         totalBytes = request.totalBytes,
         security = security,
         arrivedAtMillis = request.arrivedAtMillis,
+        spaceWarning = request.spaceWarning,
     )
 
     /** Placeholder shown while nothing has happened yet. */
