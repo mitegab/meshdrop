@@ -89,5 +89,6 @@ class AppContainer(val application: Application) {
         preferences = userPreferences,
         discovery = discoveryCoordinator,
         engine = transferEngine,
+        scope = applicationScope,
     )
 }

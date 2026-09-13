@@ -83,6 +83,7 @@ fun SendScreen(
     autoOpenPicker: Boolean = false,
 ) {
     val peers by viewModel.peers.collectAsStateWithLifecycle()
+    val latencies by viewModel.peerLatencies.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val session by viewModel.session.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -141,6 +142,7 @@ fun SendScreen(
                         items(items = peers, key = { it.id }) { peer ->
                             PeerPill(
                                 peer = peer,
+                                latencyMillis = latencies[peer.id],
                                 selected = peer.id == uiState.selectedPeer?.id,
                                 onClick = { viewModel.selectPeer(peer) },
                             )
@@ -295,6 +297,7 @@ private fun SectionLabel(text: String) {
 @Composable
 private fun PeerPill(
     peer: PeerDevice,
+    latencyMillis: Long?,
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -321,7 +324,13 @@ private fun PeerPill(
         Spacer(modifier = Modifier.width(8.dp))
         Column {
             Text(peer.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(peer.kind.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                // A measured round trip says more than a transport name: "Wi-Fi Direct" and
+                // "Wi-Fi LAN" both hide anything from 5 ms to a hotspot three hops away.
+                text = latencyMillis?.let { "${peer.kind.label} · $it ms" } ?: peer.kind.label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

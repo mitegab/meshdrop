@@ -69,7 +69,11 @@ class SendViewModel(
     private val _uiState = MutableStateFlow(SendUiState(selectedPeer = controller.selectedPeer))
     val uiState: StateFlow<SendUiState> = _uiState
 
-    val peers: StateFlow<List<PeerDevice>> = controller.peers
+    /** Nearest first: the ordering comes from measured round trips, not from names. */
+    val peers: StateFlow<List<PeerDevice>> = controller.rankedPeers
+
+    /** Round trip in ms per device id, for the "12 ms" line in the pill. */
+    val peerLatencies: StateFlow<Map<String, Long>> = controller.peerLatencies
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val session: StateFlow<TransferSessionState> = combine(
