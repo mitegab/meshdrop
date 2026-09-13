@@ -40,8 +40,15 @@ interface IncomingTransferHandler {
     /** Progress for one file. [bytesReceived] is cumulative for that file. */
     fun onFileProgress(batchId: String, fileId: String, bytesReceived: Long, sizeBytes: Long)
 
-    /** One file finished. [uri] is where it landed (null when it failed). */
-    fun onFileCompleted(batchId: String, fileId: String, uri: String?)
+    /**
+     * One file finished. [uri] is where it landed (null when it failed).
+     *
+     * [landedName] is the name it landed *under*, which is not always the name the sender
+     * asked for: a name from the network is cleaned, and a name that already exists in
+     * Downloads gets a number. The screens show this one, so the user is not left looking
+     * for a file under a name that does not exist.
+     */
+    fun onFileCompleted(batchId: String, fileId: String, uri: String?, landedName: String? = null)
 
     /** A file could not be written. */
     fun onFileFailed(batchId: String, fileId: String, reason: String)

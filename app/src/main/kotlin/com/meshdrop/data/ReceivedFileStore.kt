@@ -22,6 +22,14 @@ interface ReceivedFileSink {
 
     val outputStream: OutputStream
 
+    /**
+     * The name the file actually landed under.
+     *
+     * Not necessarily the name the sender asked for: a name from the network is cleaned, and
+     * a name that already exists in Downloads gets a number. The screens show this one.
+     */
+    val displayName: String
+
     /** Publishes the file and returns the Uri to show/open/share. */
     fun finish(): Uri?
 
@@ -40,15 +48,24 @@ class ReceivedFileStore(private val context: Context) {
 
     private val resolver get() = context.contentResolver
 
-    fun createSink(displayName: String, mimeType: String?): ReceivedFileSink {
+    /**
+     * Opens somewhere to write [requestedName].
+     *
+     * The name comes from a peer, so it is cleaned by [FileNames] before it goes anywhere
+     * near a path, and a name that already exists gets a number rather than replacing the
+     * file that is already there.
+     */
+    fun createSink(requestedName: String, mimeType: String?): ReceivedFileSink {
+        val cleaned = FileNames.clean(requestedName)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            createMediaStoreSink(displayName.sanitiseFileName(), mimeType)
+            createMediaStoreSink(cleaned, mimeType)
         } else {
-            createLegacySink(displayName.sanitiseFileName(), mimeType)
+            createLegacySink(cleaned, mimeType)
         }
     }
 
     private fun createMediaStoreSink(displayName: String, mimeType: String?): ReceivedFileSink {
+        val landedName = displayName
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, displayName)
             put(MediaStore.Downloads.MIME_TYPE, mimeType ?: FALLBACK_MIME)
@@ -71,6 +88,7 @@ class ReceivedFileStore(private val context: Context) {
 
         return object : ReceivedFileSink {
             override val outputStream: OutputStream = stream
+            override val displayName: String = landedName
             override fun finish(): Uri? {
                 stream.flushAndClose()
                 val published = ContentValues().apply {
@@ -98,12 +116,13 @@ class ReceivedFileStore(private val context: Context) {
             MeshLog.w(TAG, "Cannot create $directory, saving inside the app instead")
             return createPrivateSink(displayName, mimeType)
         }
-        val target = directory.uniqueFile(displayName)
+        val target = directory.fileFor(displayName)
         val stream = runCatching { FileOutputStream(target) }.getOrNull()
             ?: return createPrivateSink(displayName, mimeType)
 
         return object : ReceivedFileSink {
             override val outputStream: OutputStream = stream
+            override val displayName: String = target.name
             override fun finish(): Uri? {
                 stream.flushAndClose()
                 return runCatching {
@@ -124,10 +143,11 @@ class ReceivedFileStore(private val context: Context) {
     /** Last resort when public storage is unavailable: the app's own files directory. */
     private fun createPrivateSink(displayName: String, mimeType: String?): ReceivedFileSink {
         val directory = File(context.filesDir, FOLDER_NAME).apply { mkdirs() }
-        val target = directory.uniqueFile(displayName)
+        val target = directory.fileFor(displayName)
         val stream = FileOutputStream(target)
         return object : ReceivedFileSink {
             override val outputStream: OutputStream = stream
+            override val displayName: String = target.name
             override fun finish(): Uri? {
                 stream.flushAndClose()
                 return runCatching {
@@ -147,26 +167,17 @@ class ReceivedFileStore(private val context: Context) {
         runCatching { close() }
     }
 
-    /** Downloads does not allow overwriting, so `photo.jpg` becomes `photo (1).jpg`. */
-    private fun File.uniqueFile(displayName: String): File {
-        val candidate = File(this, displayName)
-        if (!candidate.exists()) return candidate
-        val dotIndex = displayName.lastIndexOf('.')
-        val base = if (dotIndex > 0) displayName.substring(0, dotIndex) else displayName
-        val extension = if (dotIndex > 0) displayName.substring(dotIndex) else ""
-        for (index in 1 until 1000) {
-            val next = File(this, "$base ($index)$extension")
-            if (!next.exists()) return next
-        }
-        return File(this, "${System.currentTimeMillis()}$extension")
+    /**
+     * A file in this directory that does not exist yet: `photo.jpg` becomes `photo (1).jpg`.
+     *
+     * Downloads does not allow overwriting, and silently replacing a file that is already
+     * there is the one outcome nobody asked for. The naming rules live in [FileNames] so the
+     * legacy path, the app-private path and the tests all agree.
+     */
+    private fun File.fileFor(displayName: String): File {
+        val directory = this
+        return File(directory, FileNames.unique(displayName) { candidate -> File(directory, candidate).exists() })
     }
-
-    private fun String.sanitiseFileName(): String = this
-        .replace(Regex("[\\\\/:*?\"<>|\\r\\n\\t]"), "_")
-        .trim()
-        .trimStart('.')
-        .take(120)
-        .ifBlank { "meshdrop-file" }
 
     companion object {
         const val TAG = "ReceivedFileStore"

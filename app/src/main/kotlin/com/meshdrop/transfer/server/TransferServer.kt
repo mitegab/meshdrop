@@ -225,7 +225,11 @@ class TransferServer(
             return
         }
 
+        // The name comes from the peer; the store cleans it and numbers duplicates.
         val sink = fileStore.createSink(file.name, file.mimeType)
+        if (sink.displayName != file.name) {
+            MeshLog.i(TAG, "Saving \"${file.name}\" as \"${sink.displayName}\"")
+        }
         val startedAt = System.currentTimeMillis()
         handler.onFileStarted(batchId, fileId)
 
@@ -278,7 +282,7 @@ class TransferServer(
 
         val uri = sink.finish()
         batch.completed += fileId
-        handler.onFileCompleted(batchId, fileId, uri?.toString())
+        handler.onFileCompleted(batchId, fileId, uri?.toString(), sink.displayName)
         output.writeJson(
             200,
             "OK",

@@ -313,8 +313,8 @@ class TransferEngine(
         }
     }
 
-    override fun onFileCompleted(batchId: String, fileId: String, uri: String?) {
-        setFileStatus(batchId, fileId, TransferStatus.COMPLETED, localUri = uri)
+    override fun onFileCompleted(batchId: String, fileId: String, uri: String?, landedName: String?) {
+        setFileStatus(batchId, fileId, TransferStatus.COMPLETED, localUri = uri, name = landedName)
         if (batchCrypto[batchId]?.sessionKeys() != null) {
             // Every GCM tag checked out, otherwise decryptStream would have thrown.
             updateSecurity(batchId) { it.copy(integrityConfirmed = true) }
@@ -372,12 +372,17 @@ class TransferEngine(
         status: TransferStatus,
         message: String? = null,
         localUri: String? = null,
+        name: String? = null,
     ) {
         updateJob(jobId, force = status.isFinished) { job ->
             job.copy(
                 files = job.files.map { file ->
                     if (file.id != fileId) file
-                    else file.copy(status = status, localUri = localUri ?: file.localUri)
+                    else file.copy(
+                        status = status,
+                        localUri = localUri ?: file.localUri,
+                        name = name?.takeIf { it.isNotBlank() } ?: file.name,
+                    )
                 },
                 message = message ?: job.message,
             )
