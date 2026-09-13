@@ -9,6 +9,8 @@ import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.model.TransferJob
 import com.meshdrop.core.model.SecurityState
 import com.meshdrop.core.model.TransferStatus
+import com.meshdrop.core.offer.OfferPolicy
+import com.meshdrop.core.offer.OfferWindow
 import com.meshdrop.core.storage.SpaceGuard
 import com.meshdrop.core.storage.VolumeSpace
 import com.meshdrop.core.storage.SpaceVerdict
@@ -33,6 +35,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -269,12 +272,23 @@ class TransferEngine(
         }
         MeshLog.i(TAG, "Incoming batch ${request.batchId} from ${request.senderName}")
 
-        val accepted = try {
-            decision.await()
+        // The card on the other device counts down; this one has to stop waiting too. An
+        // offer that is never answered would otherwise hold a handshake open until the
+        // sender's own socket timeout, and the sender would be told "connection lost"
+        // instead of "nobody answered".
+        val window = OfferWindow(request.arrivedAtMillis)
+        val waitMillis = (OfferPolicy.answerByMillis(request.arrivedAtMillis) - now()).coerceAtLeast(0L)
+        val answer = try {
+            withTimeoutOrNull(waitMillis) { decision.await() }
         } finally {
             pendingDecisions.remove(request.batchId)
             _incoming.update { list -> list.filterNot { it.batchId == request.batchId } }
         }
+
+        if (answer == null) {
+            MeshLog.i(TAG, OfferPolicy.expiredNotice(request.senderName, waitMillis))
+        }
+        val accepted = answer == true
 
         if (accepted) {
             _jobs.update { list ->

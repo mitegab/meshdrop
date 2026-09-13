@@ -53,6 +53,16 @@ class ReceiveViewModel(
     val deviceName: StateFlow<String> = controller.deviceName
     val incoming: StateFlow<List<IncomingRequest>> = controller.incoming
 
+    /**
+     * One-second clock, running only while an offer is waiting.
+     *
+     * The countdown is derived from this rather than stored per offer: recomputing
+     * `OfferWindow.countdown(now)` is free, and keeping a string in state would mean another
+     * place to forget to update.
+     */
+    private val _now = MutableStateFlow(System.currentTimeMillis())
+    val now: StateFlow<Long> = _now.asStateFlow()
+
     private val _uiState = MutableStateFlow(ReceiveUiState())
     val uiState: StateFlow<ReceiveUiState> = _uiState
 
@@ -103,6 +113,18 @@ class ReceiveViewModel(
                         state.copy(message = error.message ?: "Could not start the receiver")
                     }
                 }
+        }
+
+        viewModelScope.launch {
+            controller.incoming.collect { offers ->
+                if (offers.isEmpty()) return@collect
+                // Only ticks while there is something to count down; an idle receive screen
+                // should not be waking once a second to redraw itself.
+                while (controller.incoming.value.isNotEmpty()) {
+                    _now.value = System.currentTimeMillis()
+                    kotlinx.coroutines.delay(1_000)
+                }
+            }
         }
 
         viewModelScope.launch {

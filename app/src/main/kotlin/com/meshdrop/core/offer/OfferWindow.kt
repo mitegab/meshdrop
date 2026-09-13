@@ -95,6 +95,20 @@ object OfferPolicy {
         return lastReminderAtMillis == null || lastReminderAtMillis < window.arrivedAtMillis
     }
 
+    /**
+     * How much earlier the receiver answers than the sender stops waiting.
+     *
+     * Both sides count the same two minutes, and if they hit zero together the outcome is a
+     * coin toss: sometimes the sender's socket dies mid-answer and it shows "connection
+     * lost" when the truth is "nobody tapped Accept". Answering five seconds early makes the
+     * honest message the one that wins.
+     */
+    const val ANSWER_MARGIN_MILLIS = 5_000L
+
+    /** Deadline for the *receiver's* decision, as opposed to the sender's patience. */
+    fun answerByMillis(arrivedAtMillis: Long, durationMillis: Long = DEFAULT_WINDOW_MILLIS): Long =
+        arrivedAtMillis + durationMillis - ANSWER_MARGIN_MILLIS
+
     /** What the sender is told when nobody answered. */
     const val TIMEOUT_MESSAGE = "No answer — the other device did not respond in time"
 

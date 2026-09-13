@@ -83,6 +83,21 @@ class OfferWindowTest {
     }
 
     @Test
+    fun `the receiver answers before the sender gives up`() {
+        assertEquals(
+            OfferPolicy.DEFAULT_WINDOW_MILLIS - OfferPolicy.ANSWER_MARGIN_MILLIS,
+            OfferPolicy.answerByMillis(0L) - 0L,
+        )
+        assertEquals(
+            7_000L + OfferPolicy.DEFAULT_WINDOW_MILLIS - OfferPolicy.ANSWER_MARGIN_MILLIS,
+            OfferPolicy.answerByMillis(7_000L),
+        )
+        // Five seconds of slack, and it has to stay positive whatever the window is.
+        assertTrue(OfferPolicy.ANSWER_MARGIN_MILLIS in 1_000L..10_000L)
+        assertTrue(OfferPolicy.answerByMillis(0L, durationMillis = 0L) <= 0L)
+    }
+
+    @Test
     fun `a zero length window is expired on arrival`() {
         val immediate = OfferWindow(arrivedAtMillis = arrived, durationMillis = 0L)
 
