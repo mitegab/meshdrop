@@ -92,6 +92,39 @@ class TransferLogStore(
     @Synchronized
     fun contains(jobId: String): Boolean = entries.any { it.jobId == jobId }
 
+    /**
+     * Replaces the whole log with [entries] and rewrites the sink.
+     *
+     * Used by retention: pruning changes the middle of the file, so the only honest
+     * way to persist it is to write the file again.
+     */
+    @Synchronized
+    fun replaceAll(entries: List<TransferLogEntry>) {
+        val newestFirst = entries.sortedByDescending { it.finishedAtMillis }
+        this.entries.clear()
+        this.entries.addAll(newestFirst.asReversed())
+        trimToCapacity()
+        sink?.rewrite(this.entries.map { it.toLine() })
+    }
+
+    /**
+     * Drops entries the [policy] no longer wants and persists the result.
+     *
+     * @param pinnedJobIds jobs that must survive any age rule — a transfer whose files
+     *                     are still sitting in the vault is provenance for a file that
+     *                     still exists.
+     */
+    @Synchronized
+    fun prune(
+        nowMillis: Long = System.currentTimeMillis(),
+        policy: RetentionPolicy = RetentionPolicy(),
+        pinnedJobIds: Set<String> = emptySet(),
+    ): PruneResult {
+        val result = TransferLogRetention.prune(all(), nowMillis, policy, pinnedJobIds)
+        if (result.changed) replaceAll(result.kept)
+        return result
+    }
+
     /** Drops everything, in memory and on disk. */
     @Synchronized
     fun clear() {
