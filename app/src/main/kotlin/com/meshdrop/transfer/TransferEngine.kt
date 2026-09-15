@@ -80,6 +80,23 @@ class TransferEngine(
      * approving something that no longer fits.
      */
     private val storageVolume: () -> VolumeSpace = { VolumeSpace.UNKNOWN },
+    /**
+     * Where finished transfers are written down.
+     *
+     * Nullable so a unit test can build an engine that keeps its log in memory only; the app
+     * always passes the file-backed sink.
+     */
+    private val logSink: TransferLogSink? = null,
+    /** How long the log keeps entries; the Settings screen exposes the age. */
+    private val logPolicy: RetentionPolicy = RetentionPolicy(),
+    /**
+     * Other ways to reach a device we have already sent to.
+     *
+     * A route that stalls is usually *one address* that stalls, and discovery generally knows
+     * a second one for the same phone. Supplied as a lambda so the engine does not depend on
+     * the discovery layer (and so tests can hand it a fixed list).
+     */
+    private val alternativeRoutes: (String) -> List<PeerDevice> = { emptyList() },
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : IncomingTransferHandler {
 
@@ -262,7 +279,6 @@ class TransferEngine(
                     files = existing.files.map { file ->
                         if (file.status == TransferStatus.COMPLETED) file else file.copy(
                             status = TransferStatus.WAITING,
-                            message = null,
                             bytesTransferred = 0L,
                         )
                     },
@@ -288,7 +304,8 @@ class TransferEngine(
      */
     fun queueLabelFor(jobId: String): String? = _queuePlan.value.labelFor(jobId)
 
-    fun enqueue(pending: PendingSend) {
+    /** Only ever called from inside the engine: [PendingSend] is an implementation detail. */
+    private fun enqueue(pending: PendingSend) {
         synchronized(queueLock) { pendingSends[pending.queued.jobId] = pending }
         pumpQueue()
     }

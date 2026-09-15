@@ -49,7 +49,10 @@ class AppContainer(val application: Application) {
     /** The finished-transfer log. App-private: it names devices and files, so it is not shared storage. */
     val transferLogFile = TransferLogFile(application.filesDir)
 
-    val transferEngine = TransferEngine(
+    // Explicit types on both the engine and the controller: the engine asks the controller
+    // for fallback routes and the controller holds the engine, and letting Kotlin infer the
+    // pair makes it try to resolve the cycle at compile time.
+    val transferEngine: TransferEngine = TransferEngine(
         scope = applicationScope,
         documentRepository = documentRepository,
         fileSpooler = fileSpooler,
@@ -61,7 +64,7 @@ class AppContainer(val application: Application) {
         encryptionEnabled = { userPreferences.encryptionEnabled.value },
         storageVolume = { storageVolume() },
         logSink = transferLogFile,
-        alternativeRoutes = { deviceId -> meshController.alternativeRoutes(deviceId) },
+        alternativeRoutes = { deviceId: String -> meshController.alternativeRoutes(deviceId) },
     )
 
     /**
