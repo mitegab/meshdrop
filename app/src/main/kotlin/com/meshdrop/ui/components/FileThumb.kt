@@ -8,7 +8,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Description
@@ -18,7 +17,6 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -33,6 +31,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.meshdrop.ui.theme.MeshShapes
+import com.meshdrop.ui.theme.MeshTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -71,8 +71,8 @@ fun FileThumb(
 
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant),
+            .clip(MeshShapes.small)
+            .background(MeshTheme.colors.subtle),
         contentAlignment = Alignment.Center,
     ) {
         val loaded = bitmap
@@ -87,7 +87,7 @@ fun FileThumb(
             Icon(
                 imageVector = iconForMime(mimeType),
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = MeshTheme.colors.inkMuted,
                 modifier = Modifier.fillMaxSize(0.5f),
             )
         }

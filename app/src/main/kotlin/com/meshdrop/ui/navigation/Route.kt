@@ -3,19 +3,21 @@ package com.meshdrop.ui.navigation
 /**
  * Destinations.
  *
- * The MVP is three screens; History and Settings are one tap from the hub but are not part
- * of the send/receive flow, so they sit beside it rather than inside it.
+ * Three, and the split is deliberate:
+ *
+ *  * [Drop] is the product. Sending and receiving are the same act seen from two sides, so
+ *    they are one screen — the sheet that appears when somebody offers you files is part of
+ *    Drop, not a place you navigate to.
+ *  * [Activity] is the archive: what has already moved, searchable.
+ *  * [Settings] is where the promises live: encryption, verification, the vault, and the
+ *    statement that there is no server.
+ *
+ * There used to be five: Home, Send, Receive, History, Settings. The two that went (Send and
+ * Receive) were the two that asked the user to declare, up front, which end of a conversation
+ * they were on — before the other person had even answered.
  */
 sealed class Route(val path: String) {
-    data object Home : Route("home")
-    data object Send : Route("send")
-    data object Receive : Route("receive")
-    data object History : Route("history")
+    data object Drop : Route("drop")
+    data object Activity : Route("activity")
     data object Settings : Route("settings")
-
-    companion object {
-        /** `send?autoPick=true` jumps straight into the file picker after picking a device. */
-        const val ARG_AUTO_PICK = "autoPick"
-        const val SEND_ROUTE = "send?autoPick={autoPick}"
-    }
 }
