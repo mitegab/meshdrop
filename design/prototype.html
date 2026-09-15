@@ -1,0 +1,1180 @@
+<!doctype html>
+<html lang="en" data-theme="paper">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MeshDrop — the quiet drop (design prototype)</title>
+<style>
+/* =============================================================================
+   Faces. Self-hosted OFL variable fonts from design/fonts/, so the prototype
+   renders identically with no network. Licences sit beside them.
+   ========================================================================== */
+@font-face { font-family: 'Newsreader'; src: url('fonts/Newsreader-Variable.ttf') format('truetype-variations');
+  font-weight: 200 800; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('fonts/Inter-Variable.ttf') format('truetype-variations');
+  font-weight: 100 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono-Variable.ttf') format('truetype-variations');
+  font-weight: 100 800; font-style: normal; font-display: swap; }
+
+/* =============================================================================
+   Tokens. Identical names and values to ui/theme/Palette.kt and Type.kt.
+   ========================================================================== */
+:root {
+  --canvas:   #FAF9F5;
+  --surface:  #FFFFFF;
+  --subtle:   #F1EFE7;
+  --ink:      #1A1915;
+  --muted:    #6E6A61;
+  --hairline: #E5E1D6;
+  --clay:     #B04A2A;
+  --ember:    #D97757;
+  --wash:     #F6E9E2;
+  --on-clay:  #FFFBF8;
+  --success:  #3D7A4E;
+  --warning:  #8A5A12;
+  --danger:   #A83A2B;
+
+  --tint-1: #B04A2A;
+  --tint-2: #3F6577;
+  --tint-3: #6B5A8E;
+  --tint-4: #3D7A4E;
+  --tint-5: #9A6E1F;
+  --tint-6: #8A4C63;
+
+  --serif: 'Newsreader', 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+  --sans:  'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --mono:  'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --gutter: 20px;
+  --page:   #EFEDE6;       /* the desk the phone sits on */
+}
+
+[data-theme="ink"] {
+  --canvas:   #1B1A18;
+  --surface:  #232220;
+  --subtle:   #2C2B28;
+  --ink:      #F3F1EA;
+  --muted:    #A8A49A;
+  --hairline: #38362F;
+  --clay:     #E08262;
+  --ember:    #E9A184;
+  --wash:     #35251F;
+  --on-clay:  #201310;
+  --success:  #7FBF95;
+  --warning:  #E0B15C;
+  --danger:   #E08A80;
+
+  --tint-1: #E08262;
+  --tint-2: #8FB6C9;
+  --tint-3: #AFA0D8;
+  --tint-4: #7FBF95;
+  --tint-5: #D4B06A;
+  --tint-6: #D19BB0;
+
+  --page:   #131211;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  transition: background .25s ease, color .25s ease;
+}
+
+/* =============================================================================
+   The desk: page chrome around the phone
+   ========================================================================== */
+.topbar {
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  padding: 18px 24px;
+  border-bottom: 1px solid color-mix(in srgb, var(--hairline) 80%, transparent);
+  position: sticky; top: 0; z-index: 40;
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(10px);
+}
+.wordmark { font-family: var(--serif); font-size: 21px; letter-spacing: -.2px; }
+.wordmark span { font-family: var(--sans); font-size: 11px; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--muted); margin-left: 10px; }
+.spacer { flex: 1 1 auto; }
+
+.tabs { display: flex; gap: 2px; background: var(--subtle); border: 1px solid var(--hairline);
+  border-radius: 10px; padding: 3px; flex-wrap: wrap; }
+.tabs button {
+  font: 500 12px/1 var(--sans); color: var(--muted); background: transparent; border: 0;
+  padding: 8px 11px; border-radius: 7px; cursor: pointer;
+}
+.tabs button:hover { color: var(--ink); }
+.tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+
+.ghost {
+  font: 500 12px/1 var(--sans); color: var(--muted); background: transparent;
+  border: 1px solid var(--hairline); padding: 9px 12px; border-radius: 10px; cursor: pointer;
+}
+.ghost:hover { color: var(--ink); border-color: var(--muted); }
+
+.stage {
+  display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 32px;
+  align-items: start; padding: 32px 24px 64px; max-width: 1180px; margin: 0 auto;
+}
+.stage.no-notes { grid-template-columns: minmax(0, 1fr); }
+.stage.no-notes .notes { display: none; }
+@media (max-width: 940px) { .stage { grid-template-columns: minmax(0, 1fr); } .notes { display: none; } }
+
+.notes h3 { font-family: var(--serif); font-size: 19px; font-weight: 400; margin: 0 0 4px; }
+.notes p.lede { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 0 0 18px; }
+.notes ol { margin: 0; padding-left: 0; list-style: none; counter-reset: note; }
+.notes li { counter-increment: note; position: relative; padding: 0 0 16px 30px; font-size: 13.5px;
+  line-height: 1.55; color: var(--ink); }
+.notes li::before {
+  content: counter(note); position: absolute; left: 0; top: 1px;
+  width: 20px; height: 20px; border-radius: 50%; background: var(--wash); color: var(--clay);
+  font: 500 11px/20px var(--sans); text-align: center;
+}
+.notes li b { font-weight: 600; }
+.hint { color: var(--muted); font-size: 12.5px; text-align: center; margin: 18px 0 0; }
+
+/* =============================================================================
+   The phone
+   ========================================================================== */
+.device { display: flex; flex-direction: column; align-items: center; }
+.phone {
+  width: 390px; max-width: 100%; height: 844px; max-height: 88vh;
+  background: var(--canvas); color: var(--ink);
+  border-radius: 44px; border: 1px solid color-mix(in srgb, var(--hairline) 70%, transparent);
+  box-shadow: 0 40px 80px -40px rgba(0,0,0,.35), 0 2px 0 rgba(0,0,0,.02);
+  position: relative; overflow: hidden;
+  display: flex; flex-direction: column;
+  transition: background .25s ease;
+}
+.statusbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 26px 4px; font: 500 12px/1 var(--sans); color: var(--muted);
+}
+.statusbar .dots { display: flex; gap: 5px; align-items: center; }
+.statusbar .bar { width: 3px; height: 9px; background: var(--muted); border-radius: 1px; opacity: .8; }
+.statusbar .bar.tall { height: 12px; }
+.statusbar .battery { width: 20px; height: 10px; border: 1px solid var(--muted); border-radius: 3px;
+  position: relative; margin-left: 2px; }
+.statusbar .battery::after { content: ''; position: absolute; inset: 2px 8px 2px 2px; background: var(--muted); border-radius: 1px; }
+
+.viewport { flex: 1; overflow-y: auto; overflow-x: hidden; position: relative; scrollbar-width: thin; }
+.viewport::-webkit-scrollbar { width: 6px; }
+.viewport::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 3px; }
+.pad { padding: 8px var(--gutter) 40px; }
+
+/* ---- typography ---------------------------------------------------------- */
+.eyebrow { font: 500 10.5px/14px var(--sans); letter-spacing: 1.4px; text-transform: uppercase;
+  color: var(--muted); }
+.eyebrow.clay { color: var(--clay); }
+h1.screen { font-family: var(--serif); font-weight: 400; font-size: 34px; line-height: 40px;
+  letter-spacing: -.4px; margin: 6px 0 0; }
+h2.section { font-family: var(--serif); font-weight: 400; font-size: 18px; line-height: 24px; margin: 0; }
+h3.name { font-family: var(--serif); font-weight: 400; font-size: 21px; line-height: 27px; margin: 0; }
+h3.bigline { font-family: var(--serif); font-weight: 400; font-size: 24px; line-height: 30px;
+  letter-spacing: -.2px; margin: 0; }
+.caption { font-size: 12.5px; line-height: 18px; color: var(--muted); }
+.body { font-size: 14px; line-height: 20px; }
+.reading { font-family: var(--mono); font-size: 13px; letter-spacing: -.2px; color: var(--muted); }
+.hero { font-family: var(--mono); font-weight: 500; font-size: 30px; line-height: 34px;
+  letter-spacing: -1px; }
+.code { font-family: var(--mono); font-weight: 500; font-size: 26px; letter-spacing: 5px; }
+
+/* ---- primitives ---------------------------------------------------------- */
+.hairline { height: 1px; background: var(--hairline); border: 0; margin: 0; }
+.card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px;
+  padding: 16px; transition: background .25s ease, border-color .25s ease; }
+.card.subtle { background: var(--subtle); }
+.row { display: flex; align-items: center; gap: 12px; }
+.stack { display: flex; flex-direction: column; }
+.grow { flex: 1 1 auto; min-width: 0; }
+
+.btn {
+  height: 50px; width: 100%; border-radius: 10px; border: 1px solid transparent;
+  font: 500 14px/1 var(--sans); cursor: pointer; display: inline-flex; align-items: center;
+  justify-content: center; gap: 8px; transition: transform .12s ease, background .2s ease, opacity .2s;
+}
+.btn:active { transform: scale(.985); }
+.btn.primary { background: var(--clay); color: var(--on-clay); }
+.btn.quiet { background: transparent; color: var(--ink); border-color: var(--hairline); }
+.btn.ghost { background: transparent; color: var(--clay); border: 0; height: auto; padding: 10px 4px; width: auto; }
+.btn[disabled] { background: var(--subtle); color: color-mix(in srgb, var(--muted) 65%, transparent);
+  border-color: transparent; cursor: default; }
+.btn.small { height: 44px; font-size: 13px; }
+
+.textaction { font: 500 14px/20px var(--sans); color: var(--clay); background: none; border: 0;
+  padding: 8px 2px; cursor: pointer; }
+.textaction.muted { color: var(--muted); }
+.textaction.danger { color: var(--danger); }
+
+.pill { display: inline-flex; align-items: center; gap: 5px; background: var(--subtle);
+  color: var(--muted); border-radius: 999px; padding: 5px 11px; font: 500 11px/15px var(--sans);
+  letter-spacing: .3px; }
+.chip { border: 0; background: transparent; color: var(--muted); border-radius: 999px;
+  padding: 8px 13px; font: 500 12px/16px var(--sans); cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--wash); color: var(--clay); }
+
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--success); flex: 0 0 auto;
+  animation: breathe 2.4s ease-in-out infinite; }
+.dot.paused { background: var(--warning); animation: none; opacity: .9; }
+@keyframes breathe { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+
+.avatar { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center;
+  font: 500 15px/1 var(--sans); flex: 0 0 auto; }
+
+/* ---- progress ------------------------------------------------------------ */
+.progress { position: relative; height: 6px; border-radius: 999px; background: var(--subtle);
+  overflow: hidden; }
+.progress > .fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--clay) 85%, transparent), var(--clay));
+  transition: width .3s ease; }
+.progress > .head { position: absolute; top: 0; bottom: 0; width: 22px; border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--ember));
+  opacity: 0; transition: width .3s ease, left .3s ease, opacity .4s ease; }
+.progress.live > .head { opacity: .9; animation: glow 1.4s ease-in-out infinite alternate; }
+@keyframes glow { from { opacity: .45 } to { opacity: .95 } }
+.progress.thin { height: 3px; }
+
+/* ---- tray / peers -------------------------------------------------------- */
+.dashed { border: 1px dashed var(--hairline); border-radius: 14px; padding: 16px;
+  display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
+.peer { display: flex; align-items: center; gap: 12px; padding: 12px 0; cursor: pointer;
+  border-radius: 14px; }
+.peer:hover { background: color-mix(in srgb, var(--subtle) 55%, transparent); }
+.peer.selected { outline: 1px solid var(--hairline); background: color-mix(in srgb, var(--subtle) 70%, transparent); }
+.chev { color: var(--muted); font-size: 15px; }
+.file-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
+.thumb { width: 36px; height: 36px; border-radius: 10px; background: var(--subtle);
+  display: grid; place-items: center; font-size: 16px; flex: 0 0 auto; overflow: hidden; }
+
+/* ---- sheets -------------------------------------------------------------- */
+.scrim { position: absolute; inset: 0; background: color-mix(in srgb, #000 32%, transparent);
+  opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 30; }
+.scrim.show { opacity: 1; pointer-events: auto; }
+.sheet {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 31;
+  background: var(--surface); border-top: 1px solid var(--hairline);
+  border-radius: 26px 26px 0 0; padding: 12px var(--gutter) 22px;
+  transform: translateY(102%); transition: transform .26s cubic-bezier(.22,.8,.3,1);
+  max-height: 92%; overflow-y: auto;
+}
+.sheet.show { transform: translateY(0); }
+.grip { width: 36px; height: 4px; border-radius: 999px; background: var(--hairline);
+  margin: 0 auto 16px; }
+.option { display: flex; align-items: center; gap: 16px; padding: 12px 0; cursor: pointer; }
+.option:hover { background: color-mix(in srgb, var(--subtle) 45%, transparent); }
+
+/* ---- lists --------------------------------------------------------------- */
+.dayhead { font-family: var(--serif); font-size: 18px; margin: 24px 0 10px; }
+.act-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; cursor: pointer; }
+.act-row:hover { background: color-mix(in srgb, var(--subtle) 45%, transparent); }
+.iconbox { width: 44px; height: 44px; border-radius: 10px; background: var(--subtle);
+  display: grid; place-items: center; color: var(--muted); flex: 0 0 auto; }
+.search { display: flex; align-items: center; gap: 8px; background: var(--subtle);
+  border: 1px solid var(--hairline); border-radius: 10px; padding: 10px 12px; }
+.search input { border: 0; background: transparent; font: 400 15px/1.4 var(--sans);
+  color: var(--ink); width: 100%; outline: none; }
+.search input::placeholder { color: var(--muted); }
+
+.switch { width: 46px; height: 28px; border-radius: 999px; background: var(--subtle);
+  border: 1px solid var(--hairline); position: relative; cursor: pointer; flex: 0 0 auto;
+  transition: background .2s ease, border-color .2s ease; }
+.switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--muted); transition: transform .2s ease, background .2s ease; }
+.switch[aria-checked="true"] { background: var(--clay); border-color: var(--clay); }
+.switch[aria-checked="true"]::after { transform: translateX(18px); background: var(--on-clay); }
+
+.toggle-row { display: flex; align-items: center; gap: 16px; padding: 14px 0; cursor: pointer; }
+.kv { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; }
+
+.footer-note { text-align: center; color: var(--muted); font-size: 12px; padding: 28px 0 0; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wordmark">MeshDrop<span>design prototype</span></div>
+  <div class="spacer"></div>
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <button class="ghost" id="themeToggle">Ink</button>
+  <button class="ghost" id="notesToggle">Hide notes</button>
+</header>
+
+<main class="stage" id="stage">
+  <section class="device">
+    <div class="phone" id="phone">
+      <div class="statusbar">
+        <span id="clock">21:04</span>
+        <span class="dots">
+          <i class="bar"></i><i class="bar tall"></i><i class="bar"></i>
+          <span style="margin-left:6px">Wi-Fi</span>
+          <span class="battery"></span>
+        </span>
+      </div>
+      <div class="viewport" id="viewport"></div>
+      <div class="scrim" id="scrim"></div>
+      <div class="sheet" id="sheet"></div>
+    </div>
+    <p class="hint">Tap a phone in the list, tap the tray, tap the buttons. Everything here is live.</p>
+  </section>
+
+  <aside class="notes" id="notes">
+    <h3 id="notesTitle">Drop</h3>
+    <p class="lede" id="notesLede"></p>
+    <ol id="notesList"></ol>
+  </aside>
+</main>
+
+<script>
+/* =============================================================================
+   State
+   ========================================================================== */
+const PEERS = [
+  { id: 'ana',    name: "Ana's Pixel",  lane: 'Wi-Fi', latency: 12, tint: 1, initials: 'AP' },
+  { id: 'kavi',   name: 'Kavi (tablet)', lane: 'Wi-Fi', latency: 34, tint: 2, initials: 'KT' },
+  { id: 'jules',  name: "Jules' OnePlus", lane: 'Wi-Fi', latency: 88, tint: 3, initials: 'JO' },
+];
+
+const SAMPLE_ICONS = ['🖼️', '🖼️', '🎬', '📄', '🎧', '📦'];
+
+const RECENT = [
+  { dir: 'out', peer: "Ana's Pixel",  what: '3 photos', size: '12.6 MB', ago: '2 min ago',  status: 'ok',     verified: true },
+  { dir: 'in',  peer: "Kavi's tablet", what: '1 video', size: '84 MB',   ago: 'yesterday', status: 'ok',     verified: true },
+  { dir: 'out', peer: "Jules' OnePlus", what: '2 files', size: '3.1 MB', ago: 'yesterday', status: 'failed', verified: false },
+  { dir: 'in',  peer: "Ana's Pixel",  what: '12 photos', size: '38 MB',  ago: '12 Sep',    status: 'ok',     verified: false },
+];
+
+const PROGRESS_STEPS = { 'image/*': ['IMG_2043.HEIC', 'IMG_2044.HEIC', 'IMG_2045.HEIC'] };
+
+const state = {
+  view: 'drop',              // drop | activity | settings
+  theme: 'paper',
+  notes: true,
+  incoming: false,           // offer sheet
+  pickerOpen: false,
+  connectOpen: false,
+  detailOpen: null,          // index into RECENT
+  staged: [],                // file names
+  selectedPeer: null,
+  transfer: null,            // { direction, peer, files, total, done, speed, eta }
+  receipt: null,             // { direction, peer, files, total, seconds, ok }
+  receiving: true, offerSeconds: 96,
+  encryption: true, protection: true, autoAccept: false, vaultLock: true,
+  search: '', filter: null, sort: 'Newest',
+};
+
+/* =============================================================================
+   Helpers
+   ========================================================================== */
+const $ = (sel) => document.querySelector(sel);
+const viewport = $('#viewport');
+const sheet = $('#sheet');
+const scrim = $('#scrim');
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+const fmtBytes = (mb) => mb >= 1024 ? (mb/1024).toFixed(1) + ' GB' : mb.toFixed(1) + ' MB';
+const tint = (n) => `var(--tint-${n})`;
+
+function totalMb() { return state.staged.length * 4.2; }
+
+/* =============================================================================
+   Views
+   ========================================================================== */
+function renderDrop() {
+  const t = state.transfer;
+  const r = state.receipt;
+
+  const header = `
+    <div style="padding:22px 0 0">
+      <div class="row">
+        <span class="eyebrow">MeshDrop</span>
+        <div class="spacer"></div>
+        <button class="btn ghost" style="padding:8px" data-go="activity" title="Activity">🕘</button>
+        <button class="btn ghost" style="padding:8px" data-go="settings" title="Settings">⚙︎</button>
+      </div>
+      <h1 class="screen">Drop</h1>
+      <div class="caption" style="margin-top:4px">You are <b>Kavi's Pixel</b> on this network.</div>
+    </div>`;
+
+  const rail = `
+    <div class="card subtle" style="margin-top:20px;cursor:pointer" data-sheet="connect">
+      <div class="row">
+        <span class="dot ${state.receiving ? '' : 'paused'}"></span>
+        <div class="grow">
+          <div style="font:500 15px/21px var(--sans)">${state.receiving ? 'Listening' : 'Paused'}</div>
+          <div class="caption">${state.receiving
+            ? "Visible as Kavi's Pixel · 3 nearby"
+            : "Nobody can send to Kavi's Pixel right now."}</div>
+        </div>
+        <span class="chev">⌄</span>
+      </div>
+    </div>`;
+
+  const transferCard = t ? `
+    <div class="card" style="margin-top:24px">
+      <div class="row">
+        <span class="eyebrow">${t.direction === 'out' ? 'Sending' : 'Receiving'}</span>
+        <div class="spacer"></div>
+        <span class="pill">Wi-Fi</span>
+      </div>
+      <h3 class="name" style="margin-top:12px">${esc(t.peer)}</h3>
+      <div class="caption" style="margin-top:4px">${t.files.length} photos · ${fmtBytes(t.total)}</div>
+      <div class="row" style="margin-top:16px;align-items:flex-end">
+        <span class="hero">${Math.floor(t.done / t.total * 100)}%</span>
+        <div class="spacer"></div>
+        <span class="reading" style="color:${t.stalled ? 'var(--warning)' : 'var(--muted)'}">
+          ${t.stalled ? 'stalled' : `about ${Math.max(1, Math.round(t.eta))}s left`}
+        </span>
+      </div>
+      <div style="margin-top:12px">
+        <div class="progress ${t.stalled ? '' : 'live'}">
+          <div class="fill" style="width:${Math.floor(t.done / t.total * 100)}%"></div>
+          <div class="head" style="left:calc(${Math.floor(t.done / t.total * 100)}% - 22px)"></div>
+        </div>
+      </div>
+      <div class="reading" style="margin-top:12px">
+        ${fmtBytes(t.done)} of ${fmtBytes(t.total)}${t.stalled ? '' : ` · ${t.speed.toFixed(1)} MB/s`}
+      </div>
+      ${t.stalled ? `<div class="caption" style="color:var(--warning);margin-top:8px">
+        The link has gone quiet. MeshDrop is trying another route.</div>` : ''}
+      <hr class="hairline" style="margin:16px 0 0" />
+      <div class="row" style="margin-top:2px">
+        <button class="textaction" data-details="1">Details</button>
+        <div class="spacer"></div>
+        <button class="textaction danger" data-cancel="1">Cancel</button>
+      </div>
+      ${state.detailsOpen ? `
+      <div style="margin-top:8px">
+        ${kv('Throughput', t.speed.toFixed(1) + ' MB/s')}
+        ${kv('Steadiness', '94%')}
+        ${kv('Lane', 'Wi-Fi LAN')}
+        ${kv('Encryption', 'ECDH-P256 · AES-256-GCM')}
+        ${kv('Retransmits', '0')}
+        ${kv('Batch', 'b4f1c0a2')}
+        <div class="eyebrow" style="margin:16px 0 8px">Last few seconds</div>
+        <svg viewBox="0 0 300 40" preserveAspectRatio="none" style="width:100%;height:40px">
+          <line x1="0" y1="39" x2="300" y2="39" stroke="var(--hairline)" stroke-width="1"/>
+          <polyline fill="none" stroke="var(--clay)" stroke-width="2"
+            points="0,28 30,22 60,26 90,14 120,18 150,10 180,16 210,12 240,20 270,15 300,17"/>
+        </svg>
+      </div>` : ''}
+    </div>` : '';
+
+  const receiptCard = r ? `
+    <div class="card" style="margin-top:24px">
+      <span class="eyebrow" style="color:var(--success)">${r.direction === 'out' ? 'Sent' : 'Received'}</span>
+      <h3 class="bigline" style="margin-top:8px">${r.direction === 'out'
+        ? `Sent to ${esc(r.peer)}` : `Saved from ${esc(r.peer)}`}</h3>
+      <div class="body" style="color:var(--muted);margin-top:8px">
+        ${r.files.length} photos · ${fmtBytes(r.total)} in ${r.seconds.toFixed(1)}s ·
+        ${r.direction === 'out' ? 'every file delivered' : 'in your Downloads'}
+      </div>
+      <div style="margin-top:16px">
+        ${r.files.map((f, i) => `
+          <div class="file-row">
+            <div class="thumb">${SAMPLE_ICONS[i % SAMPLE_ICONS.length]}</div>
+            <div class="grow" style="font-size:14px">${esc(f)}</div>
+            <div class="reading">4.2 MB</div>
+          </div>`).join('')}
+      </div>
+      <div class="row" style="margin-top:16px;color:var(--muted)">
+        <span style="color:var(--success)">🔒</span>
+        <span class="caption">Encrypted end to end, and every chunk arrived intact.</span>
+      </div>
+      <hr class="hairline" style="margin:16px 0 4px" />
+      <div class="row">
+        <div class="spacer"></div>
+        <button class="textaction" data-dismiss-receipt="1">Done</button>
+      </div>
+    </div>` : '';
+
+  const tray = `
+    <div style="margin-top:28px">
+      <span class="eyebrow">What you are sending</span>
+      <h2 class="section" style="margin-top:6px">The tray</h2>
+      <div class="caption" style="margin-top:4px">${
+        state.staged.length === 0
+          ? 'Files stay on this phone until the other end accepts them.'
+          : state.selectedPeer
+            ? `Ready for ${esc(state.selectedPeer)}.`
+            : 'Now pick a phone below.'
+      }</div>
+      <div class="card" style="margin-top:12px">
+        ${state.staged.length === 0 ? `
+          <div class="dashed">
+            <div style="font:500 15px/21px var(--sans)">Nothing in here yet</div>
+            <div class="caption">Photos, videos, or any file at all.</div>
+            <button class="btn primary" style="margin-top:12px" data-sheet="pick">＋ Choose files</button>
+          </div>` : `
+          ${state.staged.map((f, i) => `
+            <div class="file-row">
+              <div class="thumb">${SAMPLE_ICONS[i % SAMPLE_ICONS.length]}</div>
+              <div class="grow">
+                <div style="font-size:14px">${esc(f)}</div>
+                <div class="reading">4.2 MB</div>
+              </div>
+              <button class="textaction" data-remove="${i}">✕</button>
+            </div>`).join('')}
+          <hr class="hairline" style="margin:10px 0" />
+          <div class="row">
+            <div class="caption grow">${state.staged.length} photos · ${fmtBytes(totalMb())}</div>
+            <button class="textaction" data-sheet="pick">Add more</button>
+            <button class="textaction muted" data-clear="1">Clear</button>
+          </div>
+          <button class="btn primary" style="margin-top:12px" ${state.selectedPeer ? '' : 'disabled'}
+            data-send="1">
+            ${state.selectedPeer ? `Send to ${esc(state.selectedPeer)}` : 'Pick a phone first'}
+          </button>`}
+      </div>
+    </div>`;
+
+  const peers = `
+    <div style="margin-top:28px">
+      <span class="eyebrow">Send to</span>
+      <div class="row" style="margin-top:6px">
+        <div class="grow">
+          <h2 class="section">Nearby</h2>
+          <div class="caption" style="margin-top:4px">Tap a phone to send to it.</div>
+        </div>
+        <button class="textaction muted">Refresh</button>
+      </div>
+      <div style="margin-top:8px">
+        ${PEERS.map(p => `
+          <div class="peer ${state.selectedPeer === p.name ? 'selected' : ''}" data-peer="${esc(p.name)}">
+            <div class="avatar" style="background:color-mix(in srgb, ${tint(p.tint)} 12%, transparent); color:${tint(p.tint)}">
+              ${p.initials}
+            </div>
+            <div class="grow">
+              <div style="font:500 15px/21px var(--sans)">${esc(p.name)}</div>
+              <div class="caption">${p.lane} · ${p.latency} ms · tap to send</div>
+            </div>
+            <span class="chev">›</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+
+  const recent = `
+    <div style="margin-top:28px">
+      <div class="row">
+        <div class="grow">
+          <h2 class="section">Recent</h2>
+          <div class="caption" style="margin-top:4px">Everything else is in Activity.</div>
+        </div>
+        <button class="textaction" data-go="activity">See all</button>
+      </div>
+      <div style="margin-top:8px">
+        ${RECENT.slice(0, 3).map((row, i) => `
+          <div class="act-row" data-detail="${i}">
+            <div class="iconbox">${row.dir === 'in' ? '⤓' : '⤒'}</div>
+            <div class="grow">
+              <div style="font-size:15px">${row.dir === 'in' ? 'From' : 'To'} ${esc(row.peer)}</div>
+              <div class="caption">${row.verified || row.status !== 'ok' ? (row.verified ? '🔒 ' : '⚠︎ ') : ''}${row.what} · ${row.size} · ${row.ago}</div>
+            </div>
+            <span style="color:${row.status === 'ok' ? 'var(--success)' : 'var(--danger)'}">
+              ${row.status === 'ok' ? '✓' : '!'}
+            </span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+
+  return `<div class="pad">${header}${rail}${t ? transferCard : r ? receiptCard : ''}${t ? '' : tray}${peers}${recent}
+    <div class="footer-note">MeshDrop · no accounts, no cloud, no telemetry.</div></div>`;
+}
+
+function renderActivity() {
+  const q = state.search.trim().toLowerCase();
+  let rows = RECENT.filter(r =>
+    (!q || r.peer.toLowerCase().includes(q) || r.what.toLowerCase().includes(q)) &&
+    (!state.filter ||
+      (state.filter === 'Received' && r.dir === 'in') ||
+      (state.filter === 'Sent' && r.dir === 'out') ||
+      (state.filter === 'Problems' && r.status !== 'ok') ||
+      (state.filter === 'Verified' && r.verified))
+  );
+  if (state.sort === 'Largest') rows = [...rows].sort((a, b) => parseFloat(b.size) - parseFloat(a.size));
+  if (state.sort === 'Oldest') rows = [...rows].reverse();
+
+  const filters = ['Received', 'Sent', 'Problems', 'Verified'];
+
+  return `<div class="pad">
+    <div style="padding:22px 0 18px">
+      <div class="row">
+        <button class="btn ghost" style="padding:8px" data-go="drop">←</button>
+        <div class="spacer"></div>
+        ${q || state.filter ? `<button class="textaction muted" data-clear-query="1">Clear</button>` : ''}
+      </div>
+      <h1 class="screen">Activity</h1>
+      <div class="caption" style="margin-top:6px">Everything sent and received on this phone, newest first.</div>
+    </div>
+
+    <div class="search">🔍<input id="searchInput" placeholder="Search a file or a phone" value="${esc(state.search)}" /></div>
+
+    <div class="row" style="margin-top:12px;flex-wrap:wrap;gap:2px">
+      ${filters.map(f => `<button class="chip" aria-pressed="${state.filter === f}" data-filter="${f}">${f}</button>`).join('')}
+      <div class="spacer"></div>
+      <button class="textaction muted" data-cycle-sort="1">${state.sort} ⇅</button>
+    </div>
+
+    <div class="dayhead">Today</div>
+    <hr class="hairline" />
+    ${rows.filter(r => r.ago.includes('min')).map(activityRow).join('') || ''}
+
+    <div class="dayhead">Yesterday</div>
+    <hr class="hairline" />
+    ${rows.filter(r => r.ago === 'yesterday').map(activityRow).join('') || ''}
+
+    <div class="dayhead">12 September 2026</div>
+    <hr class="hairline" />
+    ${rows.filter(r => !r.ago.includes('min') && r.ago !== 'yesterday').map(activityRow).join('') || ''}
+
+    ${rows.length === 0 ? `
+      <div style="text-align:center;padding:48px 24px">
+        <div style="font:500 15px/21px var(--sans)">Nothing matches that</div>
+        <div class="caption" style="margin-top:8px">Try a different word, or clear the filters.</div>
+        <button class="textaction" style="margin-top:12px" data-clear-query="1">Clear filters</button>
+      </div>` : ''}
+  </div>`;
+}
+
+function activityRow(r) {
+  const i = RECENT.indexOf(r);
+  const trust = r.verified ? '🔒 ' : (r.status !== 'ok' ? '⚠︎ ' : '');
+  return `
+    <div class="act-row" data-detail="${i}">
+      <div class="iconbox">${r.dir === 'in' ? '⤓' : '⤒'}</div>
+      <div class="grow">
+        <div style="font:500 15px/21px var(--sans)">${r.dir === 'in' ? 'From' : 'To'} ${esc(r.peer)}</div>
+        <div class="caption">${trust}${r.what} · ${r.size} · ${r.ago}</div>
+      </div>
+      <span style="color:${r.status === 'ok' ? 'var(--success)' : 'var(--danger)'}">${r.status === 'ok' ? '✓' : '!'}</span>
+    </div>`;
+}
+
+function renderSettings() {
+  return `<div class="pad">
+    <div style="padding:22px 0 4px">
+      <div class="row"><button class="btn ghost" style="padding:8px" data-go="drop">←</button></div>
+      <h1 class="screen">Settings</h1>
+    </div>
+
+    <div style="margin-top:24px">
+      <span class="eyebrow">Privacy and trust</span>
+      <h2 class="section" style="margin-top:6px">What protects your files</h2>
+      ${toggle('Encrypt files end to end',
+        state.encryption ? 'On. Files are scrambled before they leave this phone.'
+                         : 'Off. Anything you send can be read by anyone on this Wi-Fi network.',
+        'encryption')}
+      <hr class="hairline" />
+      ${toggle('Check new devices with a code',
+        'Asks you to compare six digits the first time you send to someone.', 'protection')}
+      <hr class="hairline" />
+      ${toggle('Accept automatically from devices you trust',
+        state.autoAccept ? 'On. Devices you have verified send without asking.' : 'Off. Every transfer asks you first.',
+        'autoAccept')}
+      <hr class="hairline" />
+      ${toggle('Lock the vault with your screen lock',
+        'Files you move to the vault need your fingerprint or PIN to open.', 'vaultLock')}
+      <hr class="hairline" />
+    </div>
+
+    <p style="font-family:var(--serif);font-size:16px;line-height:24px;margin:24px 0 8px">
+      There is no account to create and no server to trust. MeshDrop sends nothing about you
+      anywhere — your files go phone to phone over this Wi-Fi network, and the only thing kept
+      on this device is the list of transfers you can see in Activity.
+    </p>
+    <hr class="hairline" />
+
+    <div style="margin-top:24px">
+      <span class="eyebrow">This phone</span>
+      ${kv2('Name', "Kavi's Pixel")}
+      <hr class="hairline" />
+      ${kv2('Identity key', 'P-256')}
+      <hr class="hairline" />
+      ${kv2('Activity log', 'On device')}
+      <hr class="hairline" />
+    </div>
+
+    <div style="margin-top:24px">
+      <span class="eyebrow">Devices you trust</span>
+      <div class="body" style="color:var(--muted);padding:14px 0">Ana's Pixel<br>
+        <span class="reading">8f3c 21ab 90d4 77e1</span></div>
+      <hr class="hairline" />
+    </div>
+
+    <div style="margin-top:24px">
+      <span class="eyebrow">Network</span>
+      <h2 class="section" style="margin-top:6px">How phones find each other</h2>
+      ${kv2('Wi-Fi network', 'port 45821')}
+      ${kv2('Wi-Fi Direct', 'not enabled')}
+      ${kv2('Bluetooth', 'planned')}
+    </div>
+  </div>`;
+}
+
+function kv(label, value) {
+  return `<div class="kv"><span class="caption">${label}</span>
+    <span class="reading" style="color:var(--ink)">${value}</span></div>`;
+}
+function kv2(label, value) {
+  return `<div class="kv" style="align-items:flex-start">
+    <span class="grow"><span class="body">${label}</span></span>
+    <span class="reading" style="color:var(--muted)">${value}</span></div>`;
+}
+function toggle(title, sub, key) {
+  return `<div class="toggle-row" data-toggle="${key}">
+    <div class="grow">
+      <div style="font:500 15px/21px var(--sans)">${title}</div>
+      <div class="caption" style="margin-top:2px;color:${key === 'encryption' && !state.encryption ? 'var(--warning)' : 'var(--muted)'}">${sub}</div>
+    </div>
+    <div class="switch" role="switch" aria-checked="${state[key]}"></div>
+  </div>`;
+}
+
+/* =============================================================================
+   Sheets
+   ========================================================================== */
+function renderSheet() {
+  if (state.incoming) {
+    const files = PROGRESS_STEPS['image/*'];
+    sheet.innerHTML = `
+      <div class="grip"></div>
+      <div style="margin:-6px -20px 16px"><div class="progress thin"><div class="fill" style="width:${(state.offerSeconds / 120 * 100).toFixed(0)}%;background:var(--ember)"></div></div></div>
+      <div class="row">
+        <span class="eyebrow clay">Incoming</span>
+        <div class="spacer"></div>
+        <span class="reading" data-countdown>${Math.floor(state.offerSeconds / 60)}:${String(state.offerSeconds % 60).padStart(2, '0')} left to answer</span>
+      </div>
+      <h3 class="bigline" style="margin-top:12px">Ana's Pixel wants to send you 3 photos.</h3>
+      <div class="body" style="color:var(--muted);margin-top:8px">12.6 MB over Wi-Fi</div>
+      <div style="margin-top:16px">
+        ${files.map((f, i) => `
+          <div class="file-row">
+            <div class="thumb">${SAMPLE_ICONS[i % SAMPLE_ICONS.length]}</div>
+            <div class="grow" style="font-size:14px">${esc(f)}</div>
+            <div class="reading">4.2 MB</div>
+          </div>`).join('')}
+      </div>
+      <hr class="hairline" style="margin:16px 0 12px" />
+      <div class="row" style="cursor:pointer" data-expand-code="1">
+        <span style="color:var(--warning)">🔒</span>
+        <span class="caption" style="color:var(--warning)">Unverified · encrypted</span>
+        <div class="spacer"></div>
+        <span class="textaction" style="font-size:12px">Check code</span>
+      </div>
+      ${state.codeOpen ? `
+        <div style="background:var(--subtle);border-radius:10px;padding:18px;text-align:center;margin-top:12px">
+          <div class="code">428 193</div>
+          <div class="caption" style="margin-top:10px">Both phones must show these digits.</div>
+          <button class="btn quiet small" style="margin-top:12px" data-confirm-code="1">They match</button>
+        </div>` : ''}
+      <div class="row" style="gap:12px;margin-top:20px">
+        <button class="btn quiet" data-decline="1">Decline</button>
+        <button class="btn primary" data-accept="1">Receive</button>
+      </div>`;
+    return;
+  }
+
+  if (state.pickerOpen) {
+    sheet.innerHTML = `
+      <div class="grip"></div>
+      <span class="eyebrow">Add to the tray</span>
+      <h2 class="section" style="margin-top:8px">What are you sending?</h2>
+      <div style="margin-top:12px">
+        ${option('🖼️', 'Photos', 'One or several from the gallery', 'image/*')}
+        ${option('🎬', 'Videos', 'Clips and recordings', 'video/*')}
+        ${option('📁', 'Any file', 'Documents, archives, anything at all', 'any')}
+      </div>
+      <button class="textaction muted" data-close-sheet="1" style="margin-top:8px">Cancel</button>`;
+    return;
+  }
+
+  if (state.connectOpen) {
+    sheet.innerHTML = `
+      <div class="grip"></div>
+      <span class="eyebrow">This phone</span>
+      <h2 class="section" style="margin-top:8px">Kavi's Pixel</h2>
+      <div class="toggle-row" data-toggle="receiving">
+        <div class="grow">
+          <div style="font:500 15px/21px var(--sans)">${state.receiving ? 'Visible to nearby phones' : 'Hidden'}</div>
+          <div class="caption" style="margin-top:2px;color:${state.receiving ? 'var(--muted)' : 'var(--warning)'}">
+            ${state.receiving ? 'Anyone on this Wi-Fi can see this phone and send you files.'
+                              : 'Nobody can reach this phone, and nothing can be sent to you.'}</div>
+        </div>
+        <div class="switch" role="switch" aria-checked="${state.receiving}"></div>
+      </div>
+      <hr class="hairline" />
+      <div style="margin-top:8px">
+        ${kv('Listening on', state.receiving ? 'Wi-Fi · port 45821' : '—')}
+        ${kv('Phones found', '3 nearby')}
+        ${kv('Discovery', 'mDNS + beacon, every 3s')}
+        ${kv('Server', 'none — device to device')}
+      </div>
+      <hr class="hairline" style="margin:12px 0 4px" />
+      <div class="row">
+        <button class="textaction">Rename</button>
+        <button class="textaction muted">Look again</button>
+        <div class="spacer"></div>
+        <button class="textaction muted" data-close-sheet="1">Close</button>
+      </div>`;
+    return;
+  }
+
+  sheet.innerHTML = '';
+}
+
+function option(icon, title, sub, value) {
+  return `<div class="option" data-pick="${value}">
+    <span style="font-size:20px;width:24px;text-align:center">${icon}</span>
+    <div class="grow">
+      <div style="font:500 15px/21px var(--sans)">${title}</div>
+      <div class="caption">${sub}</div>
+    </div>
+  </div>`;
+}
+
+function renderDetail() {
+  const r = RECENT[state.detailOpen];
+  const h = r.verified || r.status !== 'ok' ? (r.verified ? '🔒' : '⚠︎') : '🔓';
+  sheet.innerHTML = `
+    <div class="grip"></div>
+    <div class="row">
+      <span class="eyebrow">${r.dir === 'in' ? 'Received' : 'Sent'}</span>
+      <div class="spacer"></div>
+      <span>${h}</span>
+    </div>
+    <h3 class="bigline" style="margin-top:12px">${esc(r.peer)}</h3>
+    <div class="body" style="color:var(--muted);margin-top:6px">${r.what} · ${r.size} · ${r.ago}</div>
+    <hr class="hairline" style="margin:16px 0 8px" />
+    <div class="file-row"><div class="thumb">🖼️</div><div class="grow" style="font-size:14px">IMG_2043.HEIC</div><div class="reading">4.2 MB</div></div>
+    <div class="file-row"><div class="thumb">🖼️</div><div class="grow" style="font-size:14px">IMG_2044.HEIC</div><div class="reading">4.1 MB</div></div>
+    <div class="file-row"><div class="thumb">🎬</div><div class="grow" style="font-size:14px">Clip.mov</div><div class="reading">4.3 MB</div></div>
+    <hr class="hairline" style="margin:16px 0 8px" />
+    ${kv('Security', r.verified ? 'Encrypted, every chunk verified' : 'Encrypted end to end')}
+    ${kv('Transport', 'Wi-Fi LAN')}
+    ${kv('Batch', 'b4f1c0a2')}
+    <button class="btn primary" style="margin-top:18px">Open</button>
+    <div class="row" style="margin-top:6px">
+      <button class="textaction">Share</button>
+      <button class="textaction">Move to vault</button>
+      <div class="spacer"></div>
+      <button class="textaction danger">Delete</button>
+    </div>
+    <button class="textaction muted" data-close-sheet="1">Close</button>`;
+}
+
+/* =============================================================================
+   Notes (the reasoning panel)
+   ========================================================================== */
+const NOTES = {
+  'drop': {
+    title: 'Drop',
+    lede: 'One surface for both directions. Send and Receive are not modes the user picks; a drop is one act seen from two sides.',
+    list: [
+      '<b>Reading order is fixed.</b> Who this phone is, what is happening now, what I am sending, who is around, what moved recently. The screen is familiar before it is read.',
+      '<b>One loud thing.</b> The only filled clay surface in the app is the tray button, and its label names the recipient: “Send to Ana’s Pixel”.',
+      '<b>The status rail is honest.</b> It breathes only while scanning and turns amber when the user pauses, because “paused” means nobody can reach this phone.',
+      '<b>The empty state teaches.</b> First run explains the privacy model in one sentence instead of showing a wifi glyph and the word “empty”.',
+      '<b>Two taps to send.</b> Tap a phone → the picker opens. Tap a phone with files already staged → it sends. Nothing else to decide.',
+      '<b>Chrome is a hairline.</b> No shadows, no elevation, no gradients: separators are 1dp and grouping comes from type and space.',
+    ],
+  },
+  'sending': {
+    title: 'A transfer in flight',
+    lede: 'The one screen that has to feel great, designed around the only question anyone asks: is it moving?',
+    list: [
+      '<b>One big number.</b> 64%, monospace and tabular, so digits do not jitter as they tick.',
+      '<b>Motion means something.</b> The head of the rule glows while bytes land and goes still when they do not — a stalled socket is visible without reading a word.',
+      '<b>The ETA hedges.</b> “about 12s left” when the link is unsteady, “stalled” when it is, because a precise lie is worse than an honest approximation.',
+      '<b>Progressive disclosure, one tap.</b> Steadiness, lanes (including ones given up), cipher, retransmits, batch id and a live throughput line live behind Details.',
+      '<b>Cancel is quiet and red.</b> It is available, it is not competing.',
+    ],
+  },
+  'receipt': {
+    title: 'The receipt',
+    lede: 'A transfer deserves an ending. The old card said “Sent” in green and left the user to guess whether the bytes arrived.',
+    list: [
+      '<b>It says delivered.</b> “Sent to Ana’s Pixel · every file delivered”, with the duration and the size.',
+      '<b>It proves it.</b> One line: encrypted end to end, every chunk arrived intact — the AEAD tags, not a hope.',
+      '<b>Files are listed</b> when there are few enough to read; otherwise the count carries it.',
+      '<b>Failures name what happened</b> and only offer “Try again” when there is something to retry.',
+    ],
+  },
+  'offer': {
+    title: 'The offer',
+    lede: 'An incoming transfer is a letter, not an alert. The sender is blocked on a socket waiting for a human, so the sheet is calm and the deadline is visible.',
+    list: [
+      '<b>The countdown is a rule</b>, depleting across the top: visible, quiet, and it turns amber as the window closes.',
+      '<b>The sentence names the person</b> and what is in it: “Ana’s Pixel wants to send you 3 photos.”',
+      '<b>Trust is one row</b> until you tap it, and then the six digits are large enough to read across a table, with “They match” underneath.',
+      '<b>Expiry disables both buttons</b> and the primary says “Too late”: accepting after the sender gave up would hang the socket and look like a freeze.',
+    ],
+  },
+  'activity': {
+    title: 'Activity',
+    lede: 'History was a list you could only operate by swiping blind. This keeps the timeline and adds the three things a list of files needs to be used.',
+    list: [
+      '<b>Search</b> over file names, device names and batch ids.',
+      '<b>Filters that say what they filter</b>, as pills that fill when active, plus a sort menu.',
+      '<b>Day groupings</b> (“Today”, “Yesterday”, an actual date) so the timeline has a spine.',
+      '<b>Provenance inline</b>: a trust mark appears in the meta line only when there is something to say — verified, or not encrypted.',
+      '<b>Every action is in the detail sheet</b>, in words. There is no longer a hidden gesture anywhere in the app.',
+    ],
+  },
+  'settings': {
+    title: 'Settings',
+    lede: 'A page to read, not a form to fill: privacy first, stated as consequences rather than feature names.',
+    list: [
+      '<b>Switches say what changes.</b> “Off. Anything you send can be read by anyone on this Wi-Fi network.”',
+      '<b>The no-server promise is prose</b>, set in the serif, because it is a statement about the code and not a switch.',
+      '<b>Plumbing is folded up.</b> Lanes, ports and future transports are facts about the app, not choices, so they sit at the bottom.',
+      '<b>Section titles are serif, sections are separated by hairlines.</b> A stack of cards reads as a form; a page reads as a page.',
+    ],
+  },
+};
+
+function renderNotes() {
+  const key = state.notesKey();
+  const n = NOTES[key];
+  $('#notesTitle').textContent = n.title;
+  $('#notesLede').textContent = n.lede;
+  $('#notesList').innerHTML = n.list.map(x => `<li>${x}</li>`).join('');
+}
+
+state.notesKey = function () {
+  if (state.incoming) return 'offer';
+  if (state.view === 'activity') return 'activity';
+  if (state.view === 'settings') return 'settings';
+  if (state.transfer) return 'sending';
+  if (state.receipt) return 'receipt';
+  return 'drop';
+};
+
+/* =============================================================================
+   Render
+   ========================================================================== */
+function render() {
+  document.documentElement.dataset.theme = state.theme;
+  $('#themeToggle').textContent = state.theme === 'paper' ? 'Ink' : 'Paper';
+
+  document.querySelectorAll('#tabs button').forEach(b => {
+    b.setAttribute('aria-selected', String(b.dataset.tab === state.tabName()));
+  });
+
+  viewport.innerHTML = state.view === 'activity' ? renderActivity()
+    : state.view === 'settings' ? renderSettings()
+    : renderDrop();
+
+  const sheetVisible = state.incoming || state.pickerOpen || state.connectOpen || state.detailOpen !== null;
+  scrim.classList.toggle('show', sheetVisible);
+  sheet.classList.toggle('show', sheetVisible);
+  if (state.detailOpen !== null) renderDetail(); else renderSheet();
+
+  renderNotes();
+}
+
+state.tabName = function () {
+  if (state.incoming) return 'offer';
+  if (state.transfer) return 'sending';
+  if (state.receipt) return 'receipt';
+  if (state.view === 'activity') return 'activity';
+  if (state.view === 'settings') return 'settings';
+  return 'drop';
+};
+
+/* =============================================================================
+   Interaction
+   ========================================================================== */
+const TABS = [
+  ['drop', 'Drop'], ['sending', 'Sending'], ['receipt', 'Receipt'],
+  ['offer', 'Offer'], ['activity', 'Activity'], ['settings', 'Settings'],
+];
+
+$('#tabs').innerHTML = TABS.map(([k, label]) =>
+  `<button role="tab" data-tab="${k}" aria-selected="false">${label}</button>`).join('');
+
+$('#tabs').addEventListener('click', (e) => {
+  const tab = e.target.closest('button')?.dataset.tab;
+  if (!tab) return;
+  setTab(tab);
+});
+
+function setTab(tab) {
+  state.pickerOpen = state.connectOpen = false;
+  state.detailOpen = null;
+  if (tab === 'offer') { state.incoming = true; state.offerSeconds = 96; state.view = 'drop'; }
+  else if (tab === 'sending') { state.incoming = false; startTransfer(); }
+  else if (tab === 'receipt') { state.incoming = false; showReceipt(); }
+  else { state.incoming = false; state.view = tab; if (tab === 'drop') { state.transfer = null; state.receipt = null; } }
+  render();
+}
+
+$('#themeToggle').addEventListener('click', () => {
+  state.theme = state.theme === 'paper' ? 'ink' : 'paper';
+  render();
+});
+
+$('#notesToggle').addEventListener('click', () => {
+  state.notes = !state.notes;
+  $('#stage').classList.toggle('no-notes', !state.notes);
+  $('#notesToggle').textContent = state.notes ? 'Hide notes' : 'Show notes';
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 't' || e.key === 'T') $('#themeToggle').click();
+  const keys = TABS.map(t => t[0]);
+  const i = keys.indexOf(state.tabName());
+  if (e.key === 'ArrowRight') setTab(keys[(i + 1) % keys.length]);
+  if (e.key === 'ArrowLeft') setTab(keys[(i - 1 + keys.length) % keys.length]);
+});
+
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  const sheetBtn = t.closest('[data-sheet]');
+  if (sheetBtn) {
+    if (sheetBtn.dataset.sheet === 'pick') state.pickerOpen = true;
+    if (sheetBtn.dataset.sheet === 'connect') state.connectOpen = true;
+    render(); return;
+  }
+  if (t.closest('[data-close-sheet]')) { state.pickerOpen = state.connectOpen = false; state.detailOpen = null; render(); return; }
+  if (t.closest('[data-go]')) {
+    state.view = t.closest('[data-go]').dataset.go;
+    state.transfer = null; state.receipt = null;
+    state.detailOpen = null; state.pickerOpen = false; state.connectOpen = false;
+    render(); return;
+  }
+
+  const pick = t.closest('[data-pick]');
+  if (pick) {
+    const kind = pick.dataset.pick;
+    state.staged = kind === 'video/*' ? ['Clip.mov'] : kind === 'any' ? ['Report.pdf', 'Archive.zip'] : [...PROGRESS_STEPS['image/*']];
+    state.pickerOpen = false;
+    if (!state.selectedPeer) state.selectedPeer = PEERS[0].name;
+    render(); return;
+  }
+
+  const peer = t.closest('[data-peer]');
+  if (peer) {
+    state.selectedPeer = peer.dataset.peer;
+    if (state.staged.length === 0) state.pickerOpen = true;
+    render(); return;
+  }
+
+  if (t.closest('[data-remove]')) {
+    const i = Number(t.closest('[data-remove]').dataset.remove);
+    state.staged.splice(i, 1);
+    render(); return;
+  }
+  if (t.closest('[data-clear]')) { state.staged = []; render(); return; }
+  if (t.closest('[data-send]')) { startTransfer('out'); return; }
+  if (t.closest('[data-cancel]')) { state.transfer = null; render(); return; }
+  if (t.closest('[data-details]')) { state.detailsOpen = !state.detailsOpen; render(); return; }
+  if (t.closest('[data-dismiss-receipt]')) { state.receipt = null; state.staged = []; render(); return; }
+
+  if (t.closest('[data-accept]')) { startTransfer('in', "Ana's Pixel"); return; }
+  if (t.closest('[data-decline]')) { state.incoming = false; render(); return; }
+  if (t.closest('[data-expand-code]')) { state.codeOpen = !state.codeOpen; render(); return; }
+  if (t.closest('[data-confirm-code]')) { state.codeOpen = false; render(); return; }
+
+  const detail = t.closest('[data-detail]');
+  if (detail) { state.detailOpen = Number(detail.dataset.detail); render(); return; }
+
+  const filter = t.closest('[data-filter]');
+  if (filter) {
+    state.filter = state.filter === filter.dataset.filter ? null : filter.dataset.filter;
+    render(); return;
+  }
+  if (t.closest('[data-cycle-sort]')) {
+    const order = ['Newest', 'Oldest', 'Largest'];
+    state.sort = order[(order.indexOf(state.sort) + 1) % order.length];
+    render(); return;
+  }
+  if (t.closest('[data-clear-query]')) { state.search = ''; state.filter = null; render(); return; }
+
+  const tgl = t.closest('[data-toggle]');
+  if (tgl) { const k = tgl.dataset.toggle; state[k] = !state[k]; render(); return; }
+});
+
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'searchInput') {
+    state.search = e.target.value;
+    // Re-render only the list, so the field keeps focus and the caret.
+    const scrolled = viewport.scrollTop;
+    viewport.innerHTML = renderActivity();
+    viewport.scrollTop = scrolled;
+    const input = $('#searchInput');
+    input.focus();
+    input.setSelectionRange(state.search.length, state.search.length);
+  }
+});
+
+/* ---- the one animation that is allowed to be a lie: a demo transfer -------- */
+function startTransfer(direction = 'out', peer = null) {
+  const files = state.staged.length ? [...state.staged] : [...PROGRESS_STEPS['image/*']];
+  const total = files.length * 4.2;
+  state.incoming = false; state.receipt = null; state.view = 'drop';
+  state.transfer = {
+    direction, peer: peer || state.selectedPeer || PEERS[0].name, files, total,
+    done: 0, speed: 3.4, eta: 4, stalled: false,
+  };
+  render();
+
+  let stallAt = 0.45;
+  const tick = setInterval(() => {
+    const tr = state.transfer;
+    if (!tr) { clearInterval(tick); return; }
+    tr.speed = 2.6 + Math.random() * 2.2;
+    // One deliberate stall, so the design can be seen doing its job.
+    tr.stalled = tr.done / tr.total > stallAt && tr.done / tr.total < stallAt + 0.08;
+    if (!tr.stalled) tr.done = Math.min(tr.total, tr.done + tr.speed * 0.35);
+    tr.eta = Math.max(0, (tr.total - tr.done) / Math.max(tr.speed, 0.1));
+    if (tr.done >= tr.total) {
+      clearInterval(tick);
+      state.receipt = {
+        direction: tr.direction, peer: tr.peer, files: tr.files, total: tr.total,
+        seconds: 4.1, ok: true,
+      };
+      state.transfer = null;
+      state.staged = [];
+      state.detailsOpen = false;
+    }
+    render();
+  }, 320);
+}
+
+function showReceipt() {
+  state.transfer = null;
+  state.receipt = {
+    direction: 'out', peer: state.selectedPeer || PEERS[0].name,
+    files: [...PROGRESS_STEPS['image/*']], total: 12.6, seconds: 4.1, ok: true,
+  };
+}
+
+/* ---- offer countdown ------------------------------------------------------ */
+setInterval(() => {
+  if (!state.incoming) return;
+  const el = document.querySelector('[data-countdown]');
+  if (!el) return;
+  state.offerSeconds = Math.max(0, state.offerSeconds - 1);
+  const s = state.offerSeconds;
+  el.textContent = s > 0
+    ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} left to answer`
+    : 'Expired — the sender gave up';
+  const bar = document.querySelector('.sheet .progress .fill');
+  if (bar) bar.style.width = Math.max(0, (s / 120) * 100) + '%';
+  const accept = document.querySelector('[data-accept]');
+  if (accept && s === 0) {
+    accept.disabled = true;
+    accept.textContent = 'Too late';
+    const decline = document.querySelector('[data-decline]');
+    if (decline) decline.disabled = true;
+  }
+}, 1000);
+
+render();
+</script>
+</body>
+</html>
