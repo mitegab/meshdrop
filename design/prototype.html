@@ -492,7 +492,7 @@ function renderDrop() {
     </div>` : '';
 
   const tray = `
-    <div style="margin-top:28px">
+    <div style="margin-top:${t || r ? 24 : 28}px">
       <span class="eyebrow">What you are sending</span>
       <h2 class="section" style="margin-top:6px">The tray</h2>
       <div class="caption" style="margin-top:4px">${
@@ -580,7 +580,7 @@ function renderDrop() {
       </div>
     </div>`;
 
-  return `<div class="pad">${header}${rail}${t ? transferCard : r ? receiptCard : ''}${t ? '' : tray}${peers}${recent}
+  return `<div class="pad">${header}${rail}${t ? transferCard : r ? receiptCard : ''}${tray}${peers}${recent}
     <div class="footer-note">MeshDrop · no accounts, no cloud, no telemetry.</div></div>`;
 }
 
@@ -1115,6 +1115,7 @@ document.addEventListener('input', (e) => {
 function startTransfer(direction = 'out', peer = null) {
   const files = state.staged.length ? [...state.staged] : [...PROGRESS_STEPS['image/*']];
   const total = files.length * 4.2;
+  if (direction === 'out') state.staged = [];
   state.incoming = false; state.receipt = null; state.view = 'drop';
   state.transfer = {
     direction, peer: peer || state.selectedPeer || PEERS[0].name, files, total,
@@ -1122,14 +1123,16 @@ function startTransfer(direction = 'out', peer = null) {
   };
   render();
 
-  let stallAt = 0.45;
+  // One deliberate, bounded stall, so the design can be seen doing its job: the
+  // rule stops moving, the copy changes to "stalled", and then the link returns.
+  let stallLeft = 0, stalled = false;
   const tick = setInterval(() => {
     const tr = state.transfer;
     if (!tr) { clearInterval(tick); return; }
-    tr.speed = 2.6 + Math.random() * 2.2;
-    // One deliberate stall, so the design can be seen doing its job.
-    tr.stalled = tr.done / tr.total > stallAt && tr.done / tr.total < stallAt + 0.08;
-    if (!tr.stalled) tr.done = Math.min(tr.total, tr.done + tr.speed * 0.35);
+    if (!stalled && tr.done / tr.total > 0.45) { stalled = true; stallLeft = 4; }
+    tr.stalled = stallLeft > 0;
+    tr.speed = tr.stalled ? 0.4 + Math.random() * 0.4 : 2.6 + Math.random() * 2.2;
+    if (stallLeft > 0) stallLeft--; else tr.done = Math.min(tr.total, tr.done + tr.speed * 0.35);
     tr.eta = Math.max(0, (tr.total - tr.done) / Math.max(tr.speed, 0.1));
     if (tr.done >= tr.total) {
       clearInterval(tick);
@@ -1138,7 +1141,6 @@ function startTransfer(direction = 'out', peer = null) {
         seconds: 4.1, ok: true,
       };
       state.transfer = null;
-      state.staged = [];
       state.detailsOpen = false;
     }
     render();
