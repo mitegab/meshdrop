@@ -1,11 +1,6 @@
 package com.meshdrop.ui.settings
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,31 +10,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Usb
-import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -48,344 +31,298 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meshdrop.core.model.EncryptionMode
 import com.meshdrop.core.model.TransportLane
 import com.meshdrop.transfer.protocol.TransferProtocol
+import com.meshdrop.ui.components.Eyebrow
+import com.meshdrop.ui.components.Hairline
+import com.meshdrop.ui.components.RowAction
+import com.meshdrop.ui.components.TextAction
+import com.meshdrop.ui.components.ToggleRow
 import com.meshdrop.ui.components.TransportIcon
+import com.meshdrop.ui.drop.RenameDialog
+import com.meshdrop.ui.theme.MeshText
+import com.meshdrop.ui.theme.MeshTheme
+import com.meshdrop.ui.theme.Space
 
 /**
- * Settings, deliberately ordered: privacy and security first, plumbing last.
+ * Settings, in the order the app thinks about the world.
  *
- * The transport section is collapsed because for most people it is a fact, not a choice —
- * it is the hook where Wi-Fi Direct, Bluetooth, USB-C or LoRa backends will appear without
- * disturbing the top of the screen.
+ * Privacy first and *stated as consequences* ("files travel as plain text") rather than as
+ * feature names, then this phone's identity, then the devices you have chosen to trust, and
+ * only then the network plumbing — which is a fact about the app, not a choice, and stays
+ * folded up at the bottom.
+ *
+ * Every section is separated by a hairline instead of being boxed in a card: at this density
+ * a stack of cards reads as a form to be filled in, and this screen is a page to be read.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val colors = MeshTheme.colors
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val snackbarHostState = remember { SnackbarHostState() }
+    val snackbar = remember { SnackbarHostState() }
     var renameDraft by remember { mutableStateOf<String?>(null) }
+    val trusted = viewModel.trustedPeers()
 
     LaunchedEffect(uiState.message) {
         uiState.message?.let {
-            snackbarHostState.showSnackbar(it)
+            snackbar.showSnackbar(it)
             viewModel.consumeMessage()
         }
     }
 
     Scaffold(
         modifier = modifier,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = { TopAppBar(title = { Text("Settings") }) },
+        containerColor = colors.canvas,
+        snackbarHost = { SnackbarHost(snackbar) },
     ) { innerPadding ->
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
+                .padding(innerPadding)
+                .padding(horizontal = Space.gutter),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = Space.xxl),
         ) {
-            item {
-                SectionHeader("Privacy & security")
+            item(key = "header") {
+                Column(modifier = Modifier.padding(top = Space.xl, bottom = Space.lg)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconAction(
+                            icon = Icons.Outlined.ArrowBack,
+                            contentDescription = "Back",
+                            onClick = onBack,
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(Space.sm))
+                    Text(
+                        text = "Settings",
+                        style = MaterialTheme.typography.displayMedium,
+                        color = colors.ink,
+                    )
+                }
+            }
+
+            // ---- privacy ------------------------------------------------------------------
+            item(key = "privacy") {
+                Eyebrow(text = "Privacy and trust")
+                Spacer(modifier = Modifier.height(Space.xs))
+                Text(
+                    text = "What protects your files",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = colors.ink,
+                )
 
                 ToggleRow(
-                    icon = Icons.Default.Lock,
-                    iconTint = MaterialTheme.colorScheme.primary,
-                    title = "End-to-end encryption",
+                    title = "Encrypt files end to end",
                     subtitle = if (uiState.encryptionEnabled) {
-                        "On · ${EncryptionMode.E2E_AES_256_GCM.cipherSuite}"
+                        "On. Files are scrambled before they leave this phone."
                     } else {
-                        "Off · files would be readable by anyone on this network"
+                        "Off. Anything you send can be read by anyone on this Wi-Fi network."
                     },
                     checked = uiState.encryptionEnabled,
                     onCheckedChange = viewModel::setEncryption,
                 )
-
+                Hairline()
                 ToggleRow(
-                    icon = Icons.Default.CheckCircle,
-                    iconTint = Color(0xFF4ADE80),
-                    title = "Ask to verify new devices",
-                    subtitle = "Compare a short code the first time you send to someone",
+                    title = "Check new devices with a code",
+                    subtitle = "Asks you to compare six digits the first time you send to " +
+                        "someone, which is how you know who is really on the other end.",
                     checked = uiState.requireVerification,
                     onCheckedChange = viewModel::setRequireVerification,
                 )
-
+                Hairline()
                 ToggleRow(
-                    icon = Icons.Default.CheckCircle,
-                    iconTint = MaterialTheme.colorScheme.primary,
-                    title = "Auto-accept from verified devices",
-                    subtitle = "Skip the accept prompt for devices you have verified",
+                    title = "Accept automatically from devices you trust",
+                    subtitle = if (uiState.autoAcceptVerified) {
+                        "On. Devices you have verified send without asking."
+                    } else {
+                        "Off. Every transfer asks you first."
+                    },
                     checked = uiState.autoAcceptVerified,
                     onCheckedChange = viewModel::setAutoAcceptVerified,
                 )
-
+                Hairline()
                 ToggleRow(
-                    icon = Icons.Default.Lock,
-                    iconTint = MaterialTheme.colorScheme.primary,
-                    title = "Vault lock",
-                    subtitle = "Require your device lock before MeshDrop opens",
+                    title = "Lock the vault with your screen lock",
+                    subtitle = "Files you move to the vault need your fingerprint or PIN to open.",
                     checked = uiState.vaultLock,
                     onCheckedChange = viewModel::setVaultLock,
                 )
-
-                // Not a switch: there is nothing to turn off, because nothing is collected.
-                StaticRow(
-                    icon = Icons.Default.CheckCircle,
-                    iconTint = Color(0xFF4ADE80),
-                    title = "No telemetry, ever",
-                    subtitle = "No accounts, no servers, no analytics, no crash reports. " +
-                        "Everything stays on these two devices.",
-                )
+                Hairline()
             }
 
-            item {
-                SectionHeader("This device")
-                ClickRow(
-                    title = "Device name",
-                    subtitle = uiState.deviceName,
+            item(key = "statement") {
+                Spacer(modifier = Modifier.height(Space.lg))
+                Text(
+                    text = "There is no account to create and no server to trust. MeshDrop " +
+                        "sends nothing about you anywhere — your files go phone to phone over " +
+                        "this Wi-Fi network, and the only thing kept on this device is the " +
+                        "list of transfers you can see in Activity.",
+                    style = MeshText.Note,
+                    color = colors.ink,
+                )
+                Spacer(modifier = Modifier.height(Space.lg))
+                Hairline()
+            }
+
+            // ---- this device --------------------------------------------------------------
+            item(key = "device") {
+                Spacer(modifier = Modifier.height(Space.xl))
+                Eyebrow(text = "This phone")
+                Spacer(modifier = Modifier.height(Space.xs))
+                RowAction(
+                    title = "Name",
+                    subtitle = "How other phones see you in their list",
+                    value = uiState.deviceName,
                     onClick = { renameDraft = uiState.deviceName },
                 )
-                StaticRow(
-                    icon = Icons.Default.Lock,
-                    iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
+                Hairline()
+                RowAction(
                     title = "Identity key",
-                    subtitle = "Generated and stored in this phone's keystore · never leaves the device",
+                    subtitle = "Generated inside this phone's keystore. It never leaves the device.",
+                    value = "P-256",
                 )
+                Hairline()
+                RowAction(
+                    title = "Activity log",
+                    subtitle = "Kept on this phone for 90 days, then dropped",
+                    value = "On device",
+                )
+                Hairline()
             }
 
-            item {
-                SectionHeader("Verified devices")
-                val trusted = viewModel.trustedPeers()
+            // ---- trusted devices ----------------------------------------------------------
+            item(key = "trusted") {
+                Spacer(modifier = Modifier.height(Space.xl))
+                Eyebrow(text = "Devices you trust")
+                Spacer(modifier = Modifier.height(Space.xs))
                 if (trusted.isEmpty()) {
-                    StaticRow(
-                        icon = Icons.Default.CheckCircle,
-                        iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        title = "None yet",
-                        subtitle = "Compare a safety code during a transfer and that device is remembered here.",
+                    Text(
+                        text = "None yet. Compare the six digits next time someone sends to you " +
+                            "and that device is remembered here.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.inkMuted,
+                        modifier = Modifier.padding(vertical = Space.md),
                     )
                 } else {
                     trusted.forEach { (fingerprint, label) ->
-                        ClickRow(
+                        RowAction(
                             title = label,
                             subtitle = fingerprint,
-                            action = "Forget",
+                            value = "Forget",
                             onClick = { viewModel.forgetPeer(fingerprint) },
                         )
+                        Hairline()
                     }
                 }
             }
 
-            // Pluggable transport backends live here, collapsed.
-            item {
-                SectionHeader("Network")
+            // ---- network ------------------------------------------------------------------
+            item(key = "network") {
+                Spacer(modifier = Modifier.height(Space.xl))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable(onClick = viewModel::toggleTransports)
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                        .padding(vertical = Space.md),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Transports", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                    Icon(
-                        imageVector = if (uiState.transportsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                AnimatedVisibility(
-                    visible = uiState.transportsExpanded,
-                    enter = expandVertically(),
-                    exit = shrinkVertically(),
-                ) {
-                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)) {
-                        TransportRow(
-                            lane = TransportLane.WIFI_LAN,
-                            title = "Wi-Fi LAN (mDNS + beacon)",
-                            subtitle = "Active · port ${viewModel.localPort}",
-                            enabled = true,
-                        )
-                        TransportRow(
-                            lane = TransportLane.WIFI_DIRECT,
-                            title = "Wi-Fi Direct",
-                            subtitle = "Registered, not enabled on this build",
-                            enabled = false,
-                        )
-                        TransportRow(
-                            lane = TransportLane.BLUETOOTH,
-                            title = "Bluetooth",
-                            subtitle = "Planned",
-                            enabled = false,
-                        )
-                        TransportRow(
-                            lane = TransportLane.USB,
-                            title = "USB-C cable",
-                            subtitle = "Planned",
-                            enabled = false,
-                        )
-                        TransportRow(
-                            lane = TransportLane.RELAY,
-                            title = "Relay through a nearby device",
-                            subtitle = "Planned",
-                            enabled = false,
+                    Column(modifier = Modifier.weight(1f)) {
+                        Eyebrow(text = "Network")
+                        Spacer(modifier = Modifier.height(Space.xs))
+                        Text(
+                            text = "How phones find each other",
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = colors.ink,
                         )
                     }
+                    Icon(
+                        imageVector = if (uiState.transportsExpanded) {
+                            Icons.Outlined.KeyboardArrowUp
+                        } else {
+                            Icons.Outlined.KeyboardArrowDown
+                        },
+                        contentDescription = if (uiState.transportsExpanded) "Hide" else "Show",
+                        tint = colors.inkMuted,
+                    )
                 }
+
+                if (uiState.transportsExpanded) {
+                    TransportRow(
+                        lane = TransportLane.WIFI_LAN,
+                        title = "Wi-Fi network",
+                        subtitle = "Active · listening on port ${viewModel.localPort}",
+                        active = true,
+                    )
+                    TransportRow(
+                        lane = TransportLane.WIFI_DIRECT,
+                        title = "Wi-Fi Direct",
+                        subtitle = "Ready in the code, not enabled in this build",
+                        active = false,
+                    )
+                    TransportRow(
+                        lane = TransportLane.BLUETOOTH,
+                        title = "Bluetooth",
+                        subtitle = "Planned — for very small files, very slowly",
+                        active = false,
+                    )
+                    TransportRow(
+                        lane = TransportLane.USB,
+                        title = "USB-C cable",
+                        subtitle = "Planned — the fastest lane there is",
+                        active = false,
+                    )
+                    Spacer(modifier = Modifier.height(Space.sm))
+                }
+                Hairline()
             }
 
-            item {
-                SectionHeader("Advanced")
-                StaticRow(
-                    icon = Icons.Default.Wifi,
-                    iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
+            // ---- about --------------------------------------------------------------------
+            item(key = "about") {
+                Spacer(modifier = Modifier.height(Space.xl))
+                Eyebrow(text = "About")
+                Spacer(modifier = Modifier.height(Space.xs))
+                RowAction(
                     title = "Protocol",
-                    subtitle = "MeshDrop wire protocol v${TransferProtocol.VERSION}",
+                    subtitle = "Wire format spoken with other phones",
+                    value = TransferProtocol.VERSION.toString(),
+                    valueMono = true,
                 )
-                StaticRow(
-                    icon = Icons.Default.Lock,
-                    iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
+                Hairline()
+                RowAction(
                     title = "Cipher",
-                    subtitle = EncryptionMode.E2E_AES_256_GCM.cipherSuite
-                        ?: "none",
+                    subtitle = if (uiState.encryptionEnabled) "In use when encryption is on" else "Unused",
+                    value = EncryptionMode.E2E_AES_256_GCM.cipherSuite ?: "—",
                 )
-                StaticRow(
-                    icon = Icons.Default.Usb,
-                    iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    title = "Frame size",
-                    subtitle = "64 KB chunks, one AES-GCM tag each",
+                Hairline()
+                Spacer(modifier = Modifier.height(Space.lg))
+                Text(
+                    text = "MeshDrop · no accounts, no cloud, no telemetry.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.inkMuted,
                 )
+                Spacer(modifier = Modifier.height(Space.lg))
             }
-
-            item { Spacer(modifier = Modifier.height(28.dp)) }
         }
     }
 
     renameDraft?.let { draft ->
-        AlertDialog(
-            onDismissRequest = { renameDraft = null },
-            title = { Text("Device name") },
-            text = {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = { renameDraft = it },
-                    singleLine = true,
-                )
+        RenameDialog(
+            draft = draft,
+            onDraftChange = { renameDraft = it },
+            onConfirm = {
+                viewModel.setDeviceName(draft)
+                renameDraft = null
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.setDeviceName(draft)
-                    renameDraft = null
-                }) { Text("Save") }
-            },
-            dismissButton = { TextButton(onClick = { renameDraft = null }) { Text("Cancel") } },
+            onDismiss = { renameDraft = null },
         )
-    }
-}
-
-@Composable
-private fun SectionHeader(text: String) {
-    Text(
-        text = text,
-        modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.primary,
-    )
-}
-
-@Composable
-private fun ToggleRow(
-    icon: ImageVector,
-    iconTint: Color,
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(22.dp))
-        Spacer(modifier = Modifier.width(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(checkedThumbColor = MaterialTheme.colorScheme.primary),
-        )
-    }
-}
-
-@Composable
-private fun StaticRow(
-    icon: ImageVector,
-    iconTint: Color,
-    title: String,
-    subtitle: String,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(22.dp))
-        Spacer(modifier = Modifier.width(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ClickRow(
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    action: String? = null,
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        action?.let { Text(it, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error) }
     }
 }
 
@@ -394,47 +331,58 @@ private fun TransportRow(
     lane: TransportLane,
     title: String,
     subtitle: String,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
+    active: Boolean,
 ) {
-    Card(
-        modifier = modifier
+    val colors = MeshTheme.colors
+    Row(
+        modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            .padding(vertical = Space.sm),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TransportIcon(lane = lane, modifier = Modifier.size(22.dp))
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (enabled) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (enabled) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .background(Color(0xFF4ADE80), androidx.compose.foundation.shape.CircleShape),
-                )
-            }
+        TransportIcon(
+            lane = lane,
+            modifier = Modifier.size(18.dp),
+            tint = if (active) colors.ink else colors.inkMuted.copy(alpha = 0.55f),
+        )
+        Spacer(modifier = Modifier.size(Space.md))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (active) colors.ink else colors.inkMuted,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.inkMuted,
+            )
         }
+        if (active) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(colors.success),
+            )
+        }
+    }
+}
+
+@Composable
+private fun IconAction(icon: ImageVector, contentDescription: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(19.dp),
+            tint = MeshTheme.colors.inkMuted,
+        )
     }
 }

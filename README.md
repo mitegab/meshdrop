@@ -33,40 +33,50 @@ device-to-device over a plain TCP socket. **No accounts, no cloud, no server.**
 | End-to-end encryption | ✅ ECDH-P256 → HKDF → AES-256-GCM, one tag per 64 KB chunk |
 | Peer verification | ✅ six digit safety code (SAS) + remembered identity fingerprints |
 | Vault for received files | ✅ app-private storage, gated by the device lock |
-| Live transfer telemetry | ✅ smoothed speed/ETA, lane strip, Canvas throughput graph |
+| Live transfer telemetry | ✅ smoothed speed/ETA, steadiness, Canvas throughput graph — one tap away in *Details* |
 | Runs without internet/cloud/accounts | ✅ LAN only; identity is a random local device id |
 | Wi-Fi Direct / Bluetooth / USB-C transport | 🚧 seams in place, see [Adding a transport](#adding-a-transport) |
 
 ## Screens
 
-| Screen | What it does |
+The interface is three surfaces, not five screens: one where a drop happens, one where drops
+are remembered, one where the promises are checked. The reasoning, the tokens and the
+per-state specs live in **[design/DESIGN.md](design/DESIGN.md)**, with a clickable prototype at
+**[design/prototype.html](design/prototype.html)** that implements the same tokens and motion
+rules as the Compose code.
+
+| Surface | What it does |
 | --- | --- |
-| **Home** | Two giant Send / Receive zones, a live *Nearby devices* strip, and a radar pulse that means "scanning" without a line of text. Tapping a device jumps straight into the file picker. |
-| **Send** | Category picker (photos / videos / any file, multi-select) → one-line trust indicator → layered progress → summary. |
-| **Receive** | Visible-as card, incoming accept/reject cards (with the safety code shown *before* you decide), download progress, landed files. |
-| **History** | Day-grouped feed with thumbnails, provenance (who sent it, verified badge, integrity tick) and swipe to re-share, move to vault or delete. |
-| **Settings** | Encryption, verification, vault lock and the no-telemetry statement at the top; transport backends in a collapsed *Transports* section. |
+| **Drop** | The whole app in one page: who this phone is, what is happening right now, the tray, who is nearby, what moved recently. Send and Receive are the same act seen from two sides — the file picker, the incoming offer and the connection details are sheets raised over it, never destinations of their own. |
+| **Activity** | Everything sent and received: search over files and devices, four filters that say what they filter, day groupings, and a detail sheet with the provenance of a batch (security, transport, batch id) and the actions — open, share, move to vault, delete. |
+| **Settings** | Privacy and trust stated as consequences ("Off. Anything you send can be read by anyone on this Wi-Fi network."), the no-server statement in prose, this phone, devices you trust, and transports folded away at the bottom. |
 
-### Design: progressive disclosure
+### Design: what the interface believes
 
-The core rule is that 90% of people want "send this file to that phone, fast" and should never
-have to look at a state machine diagram. So:
-
-* **Motion replaces text.** The radar says "I am looking"; the lane strip says "bytes are going
-  through *here*"; the assembly bar says "this file is nearly whole". No chart library — the
-  throughput graph and route topology are `Canvas` code.
-* **One sealed state drives the transfer screen.** `TransferSessionState` (Idle → Discovering →
-  AwaitingApproval / IncomingOffer → Active → Finished) is the only thing the UI reads, so the
-  screen is a pure function of state.
-* **Readouts are smoothed before they reach a composable.** `TransferTelemetry` (domain) applies
-  an EMA, quantises to a step ladder and only accepts a new ETA when it moved by more than 1 s
-  *and* 15%, so speed and ETA never flicker.
-* **Power-user detail is behind one tap.** Swarm peer chips, retransmits, protocol version and
-  cipher live in a collapsed *Network details* panel on the transfer card.
+* **A drop is one act, seen from two sides.** There is no Send screen and no Receive screen to
+  choose between before you know what you are doing. Staging files and accepting an offer are
+  the same event on the same surface — which is what the protocol already believed.
+* **One accent.** Clay means "tap this" or "these are the bytes you are waiting for". Nothing
+  decorative is ever clay, and no state is carried by colour alone: every coloured state also
+  has a word and a glyph.
+* **One loud thing per screen.** Exactly one filled button, and it names its consequence
+  (*Send to Ana's Pixel*). Motion answers "is anything happening" and nothing else — a
+  breathing dot while waiting, a progress rule while moving, both of which stop when nothing
+  is happening. There is no animation that has to be decoded.
+* **Chrome is a hairline, never a shadow.** Grouping comes from type and space, so the screens
+  read as a page rather than a stack of panels.
+* **Readouts are smoothed before they reach a composable.** `TransferTelemetry` (domain)
+  applies an EMA, quantises to a step ladder, and only accepts a new ETA when it moved by more
+  than 1 s *and* 15%, so speed and ETA never flicker. The speed line and the retransmit count
+  live behind one tap, in the transfer's *Details* disclosure.
 * **Security is one line until you ask for more.** "Verified" / "Unverified" / "Not encrypted",
-  tap to expand into plain language plus the safety code. No security vocabulary in the default
-  path.
-* **Dark first.** This is a systems tool used at night next to a router, not a productivity app.
+  tap to expand into plain language plus the safety code. No security vocabulary in the
+  default path.
+* **Nothing is hidden behind a gesture.** Actions live in the detail sheet, in words. The old
+  swipe-to-act history is gone, because an action you have to already know about is not an
+  action.
+* **Paper by default, ink on request.** This is a phone handed between two people in a kitchen,
+  in daylight. The dark theme is designed rather than inverted, and follows the system.
 
 ## How it works
 

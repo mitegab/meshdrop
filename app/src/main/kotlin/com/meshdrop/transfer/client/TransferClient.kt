@@ -36,6 +36,7 @@ import java.security.MessageDigest
 import java.net.Socket
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.ConcurrentHashMap
 
 /** What happened to one file in a batch we pushed to a peer. */
 data class FileOutcome(
@@ -280,8 +281,13 @@ class TransferClient(
                 val raw =
                     input as? BufferedInputStream ?: BufferedInputStream(input, TransferProtocol.CHUNK_BYTES)
                 // Hashing the plaintext, so the digest means the same thing on both sides
-                // whether or not this session is encrypted.
-                val buffered = DigestInputStream(raw, digest)
+                // whether or not this session is encrypted. DigestInputStream is a bare
+                // pass-through, so it is buffered again for the streaming readers below,
+                // which want a source they can pull fixed-size reads out of.
+                val buffered = BufferedInputStream(
+                    DigestInputStream(raw, digest),
+                    TransferProtocol.CHUNK_BYTES,
+                )
                 if (sessionKeys != null) {
                     SecureFrames.encryptStream(
                         key = sessionKeys.sendKey,

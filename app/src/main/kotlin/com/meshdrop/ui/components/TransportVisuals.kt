@@ -1,36 +1,38 @@
 package com.meshdrop.ui.components
 
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.DeviceHub
-import androidx.compose.material.icons.filled.Hub
-import androidx.compose.material.icons.filled.Usb
-import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.outlined.Bluetooth
+import androidx.compose.material.icons.outlined.DeviceHub
+import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material.icons.outlined.Usb
+import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.meshdrop.core.model.TransportLane
+import com.meshdrop.ui.theme.MeshTheme
 
 /**
- * One icon (and one colour) per transport, used identically on every screen: the Home strip,
- * the transfer lane bar, the Advanced panel and the Settings transports list.
+ * One glyph per transport, used identically everywhere: the lane chip on a live transfer, the
+ * peer row, and the network section in Settings.
  *
- * Consistency here is the whole point — the user should recognise "this is the Wi-Fi lane"
- * from the glyph alone, in the same way they recognise a battery icon.
+ * The glyph carries the meaning; the tint does not. The previous version gave each lane its
+ * own saturated colour (sky blue for Wi-Fi, teal for Direct, amber for relay), which made the
+ * transfer card look like a network diagram and put four competing accents on a screen that
+ * has one. Now every lane is the same quiet ink, and the only colour that appears during a
+ * transfer is the clay of the bytes actually moving.
  */
 enum class TransportVisual(
     val lane: TransportLane,
     val icon: ImageVector,
-    val tint: Color,
 ) {
-    WIFI_LAN(TransportLane.WIFI_LAN, Icons.Default.Wifi, Color(0xFF4FC3F7)),
-    WIFI_DIRECT(TransportLane.WIFI_DIRECT, Icons.Default.DeviceHub, Color(0xFF00CBB4)),
-    BLUETOOTH(TransportLane.BLUETOOTH, Icons.Default.Bluetooth, Color(0xFF7E9BFF)),
-    RELAY(TransportLane.RELAY, Icons.Default.Hub, Color(0xFFFFB74D)),
-    USB(TransportLane.USB, Icons.Default.Usb, Color(0xFFB0BEC5)),
+    WIFI_LAN(TransportLane.WIFI_LAN, Icons.Outlined.Wifi),
+    WIFI_DIRECT(TransportLane.WIFI_DIRECT, Icons.Outlined.DeviceHub),
+    BLUETOOTH(TransportLane.BLUETOOTH, Icons.Outlined.Bluetooth),
+    RELAY(TransportLane.RELAY, Icons.Outlined.Hub),
+    USB(TransportLane.USB, Icons.Outlined.Usb),
     ;
 
     companion object {
@@ -43,7 +45,7 @@ fun TransportIcon(
     lane: TransportLane,
     contentDescription: String? = null,
     modifier: Modifier = Modifier,
-    tint: Color = TransportVisual.of(lane).tint,
+    tint: Color = MeshTheme.colors.inkMuted,
 ) {
     Icon(
         imageVector = TransportVisual.of(lane).icon,
@@ -53,28 +55,22 @@ fun TransportIcon(
     )
 }
 
-/** Neutral colour for a lane that is present but not currently carrying bytes. */
-@Composable
-fun laneIdleColor(): Color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-
 /**
- * Deterministic device colour, so the same peer is always the same colour across screens
- * without persisting anything.
+ * A deterministic tint for a device, so the same phone is the same colour every time without
+ * storing anything.
+ *
+ * Tints come from the palette's warm ramp, which means a list of devices reads as a set of
+ * tints of the same paper rather than a bag of stickers.
  */
+@Composable
 fun deviceColor(deviceId: String): Color {
-    val palette = listOf(
-        Color(0xFF00CBB4),
-        Color(0xFF4FC3F7),
-        Color(0xFFFFB74D),
-        Color(0xFFBA9CFF),
-        Color(0xFF81D4A0),
-        Color(0xFFF58BA8),
-    )
+    val palette = MeshTheme.colors.deviceTints
+    if (palette.isEmpty()) return MeshTheme.colors.inkMuted
     val hash = deviceId.fold(0) { acc, char -> acc * 31 + char.code }
     return palette[Math.floorMod(hash, palette.size)]
 }
 
-/** "NP" for "Nazret's Phone". */
+/** "AP" for "Ana's Pixel". */
 fun deviceInitials(name: String): String = name
     .split(Regex("\\s+"))
     .filter { it.isNotBlank() }
