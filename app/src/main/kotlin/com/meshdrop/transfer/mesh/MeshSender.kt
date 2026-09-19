@@ -60,10 +60,12 @@ class MeshSender(
             val estimated = prepared?.sumOf { it.size } ?: MeshManifest.parse(requireNotNull(saved)).totalBytes
             val approved = helperRoutes.mapNotNull { helpers ->
                 require(helpers.isNotEmpty() && helpers.size <= 3 && peer.id !in helpers && senderId !in helpers)
-                val first = peers().firstOrNull { it.id == helpers.first() && it.isReachable() } ?: error("Reconnect the first helper")
-                // Includes framing, base64, offers, receipts and retried control traffic.
-                runCatching { helpers to RelayRoute.approve(rpc, identity, first, helpers + peer.id,
-                    maxOf(16 * 1024 * 1024L, estimated * 2 + 4 * 1024 * 1024L)) }.getOrNull()
+                // One absent helper must not prevent recovery through another approved path.
+                runCatching {
+                    val first = peers().firstOrNull { it.id == helpers.first() && it.isReachable() } ?: error("Reconnect the first helper")
+                    helpers to RelayRoute.approve(rpc, identity, first, helpers + peer.id,
+                        maxOf(16 * 1024 * 1024L, estimated * 2 + 4 * 1024 * 1024L))
+                }.getOrNull()
             }
             check(approved.isNotEmpty()) { "No helper route was approved and reachable" }
             val routes = approved.map { it.second }

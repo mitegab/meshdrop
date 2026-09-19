@@ -134,7 +134,7 @@ class MeshTransferTest {
             val sender = MeshSender(temp.newFolder("out"), PayloadSource { bytes.inputStream() to bytes.size.toLong() }, identity, trusted,
                 ConnectionFactory.TCP, { listOf(a.peer) })
             val result = withContext(Dispatchers.IO) { sender.send(destination.peer.copy(host = null, port = 0), "relay", "sender", "Sender",
-                listOf(TransferFile("file", "file.bin", bytes.size.toLong())), listOf(listOf("a", "b")),
+                listOf(TransferFile("file", "file.bin", bytes.size.toLong())), listOf(listOf("absent"), listOf("a", "b")),
                 BatchCrypto(SessionNegotiator(identity, trusted), EndpointRole.SENDER)) }
             assertTrue(result.isSuccess)
             assertArrayEquals(bytes, destination.received["file.bin"])
@@ -238,6 +238,28 @@ class MeshTransferTest {
             try { MeshRpc().call(helper.peer, MeshRpc.RELAY + "forward", request); fail("Exceeded granted bytes") }
             catch (_: IllegalStateException) {}
         } }
+    }
+
+    @Test(timeout = 45000) fun `failed chunk assignments and completion use another approved helper`() = runBlocking {
+        node("destination").use { destination -> node("a").use { a -> node("b").use { b ->
+            a.helper = true; b.helper = true; a.known = listOf(destination.peer); b.known = listOf(destination.peer)
+            val senderIdentity = InMemoryIdentity(); val trusted = trust(destination.identity)
+            val bytes = ByteArray(MeshManifest.CHUNK_BYTES + 11) { (it % 251).toByte() }
+            val callsToA = AtomicInteger()
+            val connections = ConnectionFactory { peer, register ->
+                // A approved its grant and carried identity/offer/status, then went offline.
+                if (peer.id == "a" && callsToA.incrementAndGet() > 4) throw IOException("Helper disconnected")
+                ConnectionFactory.TCP.open(peer, register)
+            }
+            val sender = MeshSender(temp.newFolder("out"), PayloadSource { bytes.inputStream() to bytes.size.toLong() },
+                senderIdentity, trusted, connections, { listOf(a.peer, b.peer) })
+            val result = withContext(Dispatchers.IO) { sender.send(destination.peer.copy(host = null, port = 0), "failover", "sender", "Sender",
+                listOf(TransferFile("file", "file.bin", bytes.size.toLong())), listOf(listOf("a"), listOf("b")),
+                BatchCrypto(SessionNegotiator(senderIdentity, trusted), EndpointRole.SENDER)) }
+            assertTrue(result.isSuccess)
+            assertArrayEquals(bytes, destination.received["file.bin"])
+            assertEquals(1, a.consents.get()); assertEquals(1, b.consents.get())
+        } } }
     }
 
 }
