@@ -197,4 +197,46 @@ class MeshTransferTest {
             assertEquals(0, helper.consents.get())
         } }
     }
+    @Test(timeout = 15000) fun `relay grants reject stolen tokens arbitrary endpoints replay and revocation`() {
+        node("helper").use { helper -> node("destination").use { destination ->
+            helper.helper = true; helper.known = listOf(destination.peer)
+            val sender = InMemoryIdentity()
+            fun signed(payload: JSONObject, signer: DeviceIdentity = sender) = SignedJson.sign(payload
+                .put("id", java.util.UUID.randomUUID().toString()).put("created", System.currentTimeMillis()), signer)
+            val route = org.json.JSONArray(listOf("helper", "destination"))
+            val grant = MeshRpc().call(helper.peer, MeshRpc.RELAY + "offer", signed(JSONObject().put("route", route).put("position", 0)
+                .put("bytes", 16_000_000).put("expires", System.currentTimeMillis() + 60_000))).getString("grant")
+            fun packet(path: String, signer: DeviceIdentity = sender) = signed(JSONObject().put("grant", grant).put("route", route)
+                .put("position", 0).put("request", JSONObject().put("path", path).put("body", JSONObject())), signer)
+            try { MeshRpc().call(helper.peer, MeshRpc.RELAY + "forward", packet("/arbitrary/tcp/proxy")); fail("Arbitrary endpoint was forwarded") }
+            catch (_: IllegalStateException) {}
+            try { MeshRpc().call(helper.peer, MeshRpc.RELAY + "forward", packet(MeshRpc.PREFIX + "identity", InMemoryIdentity())); fail("Stolen grant worked") }
+            catch (_: IllegalStateException) {}
+            val valid = packet(MeshRpc.PREFIX + "identity")
+            val reply = MeshRpc().call(helper.peer, MeshRpc.RELAY + "forward", valid)
+            assertEquals("destination", SignedJson.verify(reply, destination.identity.publicKeyBytes).payload.getString("deviceId"))
+            try { MeshRpc().call(helper.peer, MeshRpc.RELAY + "forward", valid); fail("Replayed packet worked") }
+            catch (_: IllegalStateException) {}
+            helper.relay.revokeAll()
+            try { MeshRpc().call(helper.peer, MeshRpc.RELAY + "forward", packet(MeshRpc.PREFIX + "identity")); fail("Revoked grant worked") }
+            catch (_: IllegalStateException) {}
+        } }
+    }
+
+    @Test(timeout = 15000) fun `relay enforces a consented byte budget`() {
+        node("helper").use { helper -> node("destination").use { destination ->
+            helper.helper = true; helper.known = listOf(destination.peer)
+            val sender = InMemoryIdentity()
+            val route = org.json.JSONArray(listOf("helper", "destination"))
+            fun signed(body: JSONObject) = SignedJson.sign(body.put("id", java.util.UUID.randomUUID().toString())
+                .put("created", System.currentTimeMillis()), sender)
+            val grant = MeshRpc().call(helper.peer, MeshRpc.RELAY + "offer", signed(JSONObject().put("route", route).put("position", 0)
+                .put("bytes", 1).put("expires", System.currentTimeMillis() + 60_000))).getString("grant")
+            val request = signed(JSONObject().put("grant", grant).put("route", route).put("position", 0)
+                .put("request", JSONObject().put("path", MeshRpc.PREFIX + "identity").put("body", JSONObject())))
+            try { MeshRpc().call(helper.peer, MeshRpc.RELAY + "forward", request); fail("Exceeded granted bytes") }
+            catch (_: IllegalStateException) {}
+        } }
+    }
+
 }

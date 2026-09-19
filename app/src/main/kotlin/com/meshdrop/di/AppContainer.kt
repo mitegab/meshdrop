@@ -82,8 +82,8 @@ class AppContainer(val application: Application) {
      * not evidence the disk is full, and reporting 0 would refuse every transfer.
      */
     private fun storageVolume(): VolumeSpace = runCatching {
-        val path = application.getExternalFilesDir(null) ?: application.filesDir
-        StatFs(path.absolutePath).let { VolumeSpace(it.availableBytes, it.totalBytes) }
+        val paths = listOfNotNull(application.filesDir, application.getExternalFilesDir(null))
+        paths.map { StatFs(it.absolutePath) }.minBy { it.availableBytes }.let { VolumeSpace(it.availableBytes, it.totalBytes) }
     }.getOrElse { VolumeSpace.UNKNOWN }
 
     /**

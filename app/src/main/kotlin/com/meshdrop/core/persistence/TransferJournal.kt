@@ -56,12 +56,31 @@ class SendJournal(directory: File) {
 
 /** Individual per-batch receiver journals are named by hashes, not by network-controlled paths. */
 class ReceiveJournal(private val directory: File) {
+    init { prune() }
     private fun store(id: String) = AtomicJson(File(directory, "batch-${AtomicJson.digest(id.toByteArray())}.json"))
     fun read(id: String): JSONObject? = store(id).read()?.takeIf {
         it.optInt("version") == 1 && it.optString("id") == id &&
             System.currentTimeMillis() - it.optLong("touched") in 0..RETENTION_MS
     }
-    @Synchronized fun write(id: String, json: JSONObject) { store(id).write(json.put("version", 1).put("id", id)) }
+    @Synchronized fun write(id: String, json: JSONObject) { store(id).write(json.put("version", 1).put("id", id))
+        if (directory.listFiles().orEmpty().count { it.name.startsWith("batch-") && it.extension == "json" } > 64) prune() }
     @Synchronized fun remove(id: String) = store(id).delete()
+    @Synchronized fun prune(now: Long = System.currentTimeMillis()) {
+        val journals = directory.listFiles().orEmpty().filter { it.name.startsWith("batch-") && it.extension == "json" }
+        val references = mutableSetOf<String>()
+        journals.sortedByDescending { it.lastModified() }.forEachIndexed { index, path ->
+            val value = AtomicJson(path).read()
+            val keep = index < 64 && value != null && now - value.optLong("touched") in 0..RETENTION_MS
+            val parts = value?.optJSONObject("parts")
+            parts?.keys()?.forEach { key ->
+                val name = parts.optString(key)
+                if (keep) references += name else com.meshdrop.core.resume.PartialFile.restore(directory, name)?.discard()
+            }
+            if (!keep) path.delete()
+        }
+        directory.listFiles().orEmpty().filter {
+            it.name !in references && now - it.lastModified() > RETENTION_MS && (it.name.endsWith(".part") || it.name.endsWith(".tmp"))
+        }.forEach { it.delete() }
+    }
     companion object { const val RETENTION_MS = 24 * 60 * 60_000L }
 }

@@ -19,8 +19,10 @@ class MeshRpc(private val connections: ConnectionFactory = ConnectionFactory.TCP
     override fun close() { closed = true; abortActive() }
     fun call(peer: PeerDevice, path: String, body: JSONObject = JSONObject(), authorize: () -> Boolean = { true }): JSONObject {
         check(!closed) { "Request cancelled" }
-        val connection = connections.open(peer) { active.add(it); if (closed || !authorize()) { it.close(); error("Request cancelled") } }
-        try { return connection.use {
+        var pending: com.meshdrop.transfer.link.DuplexConnection? = null
+        try {
+        val connection = connections.open(peer) { pending = it; active.add(it); if (closed || !authorize()) { it.close(); error("Request cancelled") } }
+        return connection.use {
             it.soTimeout = 125_000
             val bytes = body.toString().toByteArray()
             require(bytes.size <= MAX_BYTES) { "Mesh request exceeds its quota" }
@@ -28,7 +30,7 @@ class MeshRpc(private val connections: ConnectionFactory = ConnectionFactory.TCP
             val response = BufferedInputStream(it.getInputStream()).readResponse(MAX_BYTES.toLong())
             check(response.isSuccessful) { "${peer.name}: ${response.bodyText().take(256)} (HTTP ${response.status})" }
             JSONObject(response.bodyText())
-        } } finally { active.remove(connection) }
+        } } finally { pending?.let { active.remove(it) } }
     }
     companion object {
         const val MAX_BYTES = 4 * 1024 * 1024

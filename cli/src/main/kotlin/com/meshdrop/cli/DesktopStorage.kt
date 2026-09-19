@@ -53,7 +53,7 @@ class DesktopFileStore(private val output: File, home: File) : IncomingFileStore
         output.mkdirs()
         // A peer's name never becomes a path, including Windows drive prefixes and devices.
         val clean = requestedName.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim().trim('.').take(160).ifBlank { "file" }
-        val safe = if (clean.substringBefore('.').uppercase() in setOf("CON", "PRN", "AUX", "NUL", "COM1", "COM2", "LPT1", "LPT2")) "_$clean" else clean
+        val safe = if (clean.substringBefore('.').uppercase().matches(Regex("(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])"))) "_$clean" else clean
         val temp = File.createTempFile(".meshdrop-", ".tmp", output)
         val stream = FileOutputStream(temp)
         return object : ReceivedFileSink {

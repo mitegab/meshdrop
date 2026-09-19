@@ -140,6 +140,7 @@ jobs:
           cli/build/install/meshdrop/bin/meshdrop --help
           cli/build/install/meshdrop/bin/meshdrop identity --home "$RUNNER_TEMP/meshdrop-cli" --name "CI desktop"
           cli/build/install/meshdrop/bin/meshdrop queue --home "$RUNNER_TEMP/meshdrop-cli"
+          python3 scripts/cli_smoke.py
 
       - name: Upload desktop CLI
         if: success()

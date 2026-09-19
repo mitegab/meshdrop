@@ -122,9 +122,14 @@ class UsbTransport(context: Context, private val scope: CoroutineScope, private 
                     override fun read(b: ByteArray, off: Int, len: Int): Int {
                         if (len == 0) return 0
                         val block = ByteArray(minOf(len, 16 * 1024))
+                        var lastData = System.nanoTime()
                         while (!closed.get()) {
                             val count = usb.bulkTransfer(incoming, block, block.size, 1000)
                             if (count > 0) { block.copyInto(b, off, 0, count); return count }
+                            // A detached/broken driver can return immediately instead of waiting
+                            // for the bulk timeout. Never spin or retain it indefinitely.
+                            if (System.nanoTime() - lastData > 120_000_000_000L) throw IOException("USB read timed out")
+                            Thread.sleep(10)
                         }
                         return -1
                     }

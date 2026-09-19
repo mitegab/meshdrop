@@ -29,13 +29,18 @@ class MeshReceiver(
     private val handler: IncomingTransferHandler,
 ) {
     private class Session(val manifest: MeshManifest, val owner: String, val root: File, val key: ByteArray, val token: String) {
+        @Volatile var active = true
         val receipts = JSONObject()
         val verified = ConcurrentHashMap<String, MutableSet<Int>>()
         val state get() = AtomicJson(File(root, "receipts.json"))
     }
     private val sessions = ConcurrentHashMap<String, Session>()
-    private val offering = ConcurrentHashMap.newKeySet<String>()
-    init { directory.mkdirs() }
+    private val offering = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
+    init {
+        directory.mkdirs()
+        directory.listFiles().orEmpty().filter { it.isDirectory && System.currentTimeMillis() - it.lastModified() > 24 * 60 * 60_000L }
+            .forEach { it.deleteRecursively() }
+    }
     fun identity(): JSONObject = SignedJson.sign(JSONObject().put("deviceId", localId).put("name", localName()).put("version", 1), identity)
     private fun root(id: String) = File(directory, AtomicJson.digest(id.toByteArray())).apply { mkdirs() }
     private fun chunk(session: Session, file: MeshFile, index: Int) = File(session.root, "${AtomicJson.digest(file.id.toByteArray())}-$index.chunk")
@@ -45,7 +50,7 @@ class MeshReceiver(
         val path = chunk(session, file, index)
         if (!path.isFile) return false
         val expectedSize = minOf(MeshManifest.CHUNK_BYTES.toLong(), file.size - index.toLong() * MeshManifest.CHUNK_BYTES)
-        val valid = path.length() == expectedSize && path.inputStream().use { com.meshdrop.core.resume.PartialFile.digestPrefix(it, path.length()) } == file.chunks[index]
+        val valid = path.length() == expectedSize && path.inputStream().use { com.meshdrop.core.resume.PartialFile.digestPrefix(it, path.length()) { check(session.active) { "Session stopped" } } } == file.chunks[index]
         if (!valid) path.delete() else verified.add(index)
         return valid
     }
@@ -60,6 +65,7 @@ class MeshReceiver(
         check(session.manifest.expires >= System.currentTimeMillis()) { "Manifest expired" }
         check(handler.awaitVerification(session.manifest.id)) { "Compare safety codes before delivery" }
         return synchronized(session) {
+            check(session.active) { "Session cancelled or stopped" }
             when (operation) {
                 "status" -> status(session)
                 "chunk" -> acceptChunk(session, body)
@@ -77,7 +83,8 @@ class MeshReceiver(
         val signed = SignedJson.verify(body.getJSONObject("manifest"))
         val manifest = MeshManifest.parse(signed.payload)
         require(manifest.destination == AtomicJson.digest(identity.publicKeyBytes)) { "This manifest belongs to another destination" }
-        require(offering.add(manifest.id)) { "An offer is already pending" }
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean()
+        require(offering.putIfAbsent(manifest.id, cancelled) == null) { "An offer is already pending" }
         try {
             require(sessions.size < 32 || sessions.containsKey(manifest.id)) { "Too many mesh sessions" }
             val root = root(manifest.id)
@@ -97,7 +104,8 @@ class MeshReceiver(
                 SignedJson.b64(ByteArray(32).also { SecureRandom().nextBytes(it) }))
             session.state.read()?.let { saved -> saved.keys().forEach { session.receipts.put(it, saved.get(it)) } }
             durable.write(body.getJSONObject("manifest"))
-            sessions[manifest.id] = session
+            sessions.put(manifest.id, session)?.active = false
+            if (cancelled.get()) { sessions.remove(manifest.id, session); error("Offer cancelled or receiver stopped") }
             manifest.files.forEach { file ->
                 if (session.receipts.has(file.id)) {
                     val saved = session.receipts.getJSONObject(file.id)
@@ -109,7 +117,7 @@ class MeshReceiver(
             }
             return receipt(session, JSONObject().put("token", session.token).put("accepted", true)
                 .put("security", with(ControlMessages) { requireNotNull(handler.localMaterialFor(manifest.id)).toDto().toJsonObject() }))
-        } finally { offering.remove(manifest.id) }
+        } finally { offering.remove(manifest.id, cancelled) }
     }
 
     private fun status(session: Session): JSONObject = receipt(session, JSONObject().put("files", JSONObject().apply {
@@ -133,6 +141,7 @@ class MeshReceiver(
             cipher.updateAAD(aad(session.manifest.hash, file.id, index))
             val plaintext = cipher.doFinal(encrypted)
             require(AtomicJson.digest(plaintext) == file.chunks[index]) { "Chunk does not match the authenticated manifest" }
+            check(session.active) { "Session stopped" }
             val target = chunk(session, file, index)
             val temp = File.createTempFile("chunk-", ".tmp", session.root)
             try {
@@ -152,25 +161,35 @@ class MeshReceiver(
     }
 
     private fun finishIfReady(session: Session, file: MeshFile) {
+        check(session.active) { "Session stopped" }
         if (session.receipts.has(file.id)) return
         if ((session.verified[file.id]?.size ?: 0) != file.chunks.size) return
         val sink = files.createSink(file.name, file.mime)
         try {
             val hash = java.security.MessageDigest.getInstance("SHA-256")
             val output = java.security.DigestOutputStream(sink.outputStream, hash)
-            file.chunks.indices.forEach { chunk(session, file, it).inputStream().use { source -> source.copyTo(output) } }
+            file.chunks.indices.forEach { index ->
+                check(session.active) { "Session stopped" }
+                chunk(session, file, index).inputStream().use { source -> source.copyTo(output) }
+            }
             val digest = hash.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
             require(digest == file.digest) { "Reassembled file failed its authenticated whole-file hash" }
+            check(session.active) { "Session stopped" }
             val uri = sink.finish() ?: error("Could not publish reassembled file")
             session.receipts.put(file.id, JSONObject().put("uri", uri).put("name", sink.displayName).put("digest", digest).put("bytes", file.size))
+            check(session.active) { "Session stopped after publication" }
             session.state.write(session.receipts)
             file.chunks.indices.forEach { chunk(session, file, it).delete() }
             handler.onFileCompleted(session.manifest.id, file.id, uri, sink.displayName)
         } catch (error: Exception) { sink.abort(); handler.onFileFailed(session.manifest.id, file.id, error.message ?: "Assembly failed"); throw error }
     }
 
-    fun cancel(id: String) { sessions.remove(id); root(id).deleteRecursively() }
-    fun stop() { sessions.clear() } // durable manifests/chunks remain; no key or approval is recovered
+    fun cancel(id: String) {
+        offering[id]?.set(true)
+        sessions.remove(id)?.active = false
+        root(id).deleteRecursively()
+    }
+    fun stop() { offering.values.forEach { it.set(true) }; sessions.values.forEach { it.active = false }; sessions.clear() } // durable manifests/chunks remain; no key or approval is recovered
     companion object {
         fun aad(manifest: String, file: String, index: Int) = "meshdrop-chunk-v1\n$manifest\n$file\n$index".toByteArray(Charsets.UTF_8)
     }

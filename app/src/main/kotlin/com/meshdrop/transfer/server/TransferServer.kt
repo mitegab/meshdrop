@@ -95,7 +95,11 @@ class TransferServer(
         port = 0
         connections.forEach { it.closeQuietly() }
         // Stopping is not cancellation: keep verified prefixes for a fresh approval after restart.
-        batches.values.forEach { checkpoint(it) }
+        batches.values.forEach {
+            it.stopped = true
+            if (it.fingerprint == null || journal == null) it.partials.values.forEach { part -> part.discard() }
+            else checkpoint(it)
+        }
         batches.clear()
         meshService?.stop()
         MeshLog.i(TAG, "Transfer server stopped")
@@ -337,7 +341,7 @@ class TransferServer(
             return
         }
         try {
-            if (batch.cancelled) throw java.io.InterruptedIOException("Cancelled")
+            if (batch.cancelled || batch.stopped) throw java.io.InterruptedIOException("Cancelled or stopped")
             if (fileId in batch.completed) {
                 output.writeError(409, "Conflict", "File already completed; query batch status")
                 return
@@ -369,7 +373,7 @@ class TransferServer(
                 val bytes = stream.use { target ->
                     fun progress(copied: Long) {
                         batch.lastActivity = System.currentTimeMillis()
-                        if (batch.cancelled) throw java.io.InterruptedIOException("Cancelled")
+                        if (batch.cancelled || batch.stopped) throw java.io.InterruptedIOException("Cancelled or stopped")
                         handler.onFileProgress(batchId, fileId, offset + copied, size)
                     }
                     if (key != null) {
@@ -378,7 +382,7 @@ class TransferServer(
                         input.copyToWithProgress(target, head.contentLength, onProgress = ::progress)
                     }
                 }
-                if (batch.cancelled) throw java.io.InterruptedIOException("Cancelled")
+                if (batch.cancelled || batch.stopped) throw java.io.InterruptedIOException("Cancelled or stopped")
                 if (key == null && bytes != head.contentLength) throw java.io.EOFException("Truncated upload")
                 if (knownSize && part.size != size) throw java.io.EOFException("Truncated file")
                 val digest = part.digest()
@@ -386,7 +390,7 @@ class TransferServer(
                 val sink = fileStore.createSink(file.name, file.mimeType)
                 val uri = try {
                     part.file.inputStream().use { it.copyTo(sink.outputStream) }
-                    if (batch.cancelled) throw java.io.InterruptedIOException("Cancelled")
+                    if (batch.cancelled || batch.stopped) throw java.io.InterruptedIOException("Cancelled or stopped")
                     sink.finish() ?: throw java.io.IOException("Could not publish received file")
                 } catch (error: Throwable) {
                     sink.abort()
@@ -414,7 +418,7 @@ class TransferServer(
             }
         } finally {
             batch.writing.remove(fileId)
-            if (!batch.cancelled) checkpoint(batch)
+            if (!batch.cancelled && !batch.stopped) checkpoint(batch)
         }
     }
 
@@ -501,6 +505,7 @@ class TransferServer(
     /** Drops a batch (used when the user cancels a download). */
     fun forget(batchId: String) {
         meshService?.cancel(batchId)
+        if (!batches.containsKey(batchId)) restore(batchId)?.partials?.values?.forEach { it.discard() }
         journal?.remove(batchId)
         val batch = batches.remove(batchId)
         if (batch != null) {
@@ -564,6 +569,7 @@ class TransferServer(
         val writing = ConcurrentHashMap.newKeySet<String>()
         @Volatile var lastActivity = System.currentTimeMillis()
         @Volatile var cancelled = false
+        @Volatile var stopped = false
         @Volatile var bytesWritten: Long = 0L
     }
 

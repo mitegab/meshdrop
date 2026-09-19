@@ -31,6 +31,11 @@ class MeshSender(
     private val connections: ConnectionFactory,
     private val peers: () -> List<PeerDevice>,
 ) {
+    init {
+        cache.mkdirs()
+        cache.listFiles().orEmpty().filter { it.isDirectory && System.currentTimeMillis() - it.lastModified() > 24 * 60 * 60_000L }
+            .forEach { it.deleteRecursively() }
+    }
     private data class Assignment(val file: MeshFile, val index: Int, val route: Int, val bytes: Long)
     fun discard(id: String) { File(cache, AtomicJson.digest(id.toByteArray())).deleteRecursively() }
 
@@ -48,7 +53,10 @@ class MeshSender(
             val manifestStore = AtomicJson(File(root, "manifest.json"))
             val saved = manifestStore.read()
             check(saved != null || !File(root, "manifest.json").exists()) { "Cached manifest is corrupt; pick the files again" }
-            val prepared = if (saved == null) files.map { prepare(root, it, isCancelled) } else null
+            var remainingChunks = MeshManifest.MAX_CHUNKS
+            val prepared = if (saved == null) files.map {
+                prepare(root, it, isCancelled, remainingChunks).also { file -> remainingChunks -= file.chunks.size }
+            } else null
             val estimated = prepared?.sumOf { it.size } ?: MeshManifest.parse(requireNotNull(saved)).totalBytes
             val approved = helperRoutes.mapNotNull { helpers ->
                 require(helpers.isNotEmpty() && helpers.size <= 3 && peer.id !in helpers && senderId !in helpers)
@@ -166,7 +174,7 @@ class MeshSender(
     }
 
     private fun payload(root: File, id: String) = File(root, "${AtomicJson.digest(id.toByteArray())}.payload")
-    private fun prepare(root: File, file: TransferFile, cancelled: () -> Boolean): MeshFile {
+    private fun prepare(root: File, file: TransferFile, cancelled: () -> Boolean, chunkBudget: Int): MeshFile {
         val (input, _) = source.open(file) ?: error("Cannot reopen ${file.name}; select it again to grant access")
         val target = payload(root, file.id)
         val hash = MessageDigest.getInstance("SHA-256")
@@ -179,7 +187,7 @@ class MeshSender(
                 var count = 0
                 while (count < block.size) { val n = source.read(block, count, block.size - count); if (n < 0) break; count += n }
                 if (count == 0) break
-                require(chunks.size < MeshManifest.MAX_CHUNKS) { "File exceeds mesh chunk budget" }
+                require(chunks.size < chunkBudget) { "File exceeds mesh chunk budget" }
                 output.write(block, 0, count); hash.update(block, 0, count); size += count
                 chunks += AtomicJson.digest(block.copyOf(count))
             }
