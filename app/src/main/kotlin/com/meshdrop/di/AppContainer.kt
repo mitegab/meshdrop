@@ -120,7 +120,7 @@ class AppContainer(val application: Application) {
         discovery = discoveryCoordinator,
         engine = transferEngine,
         scope = applicationScope,
-        startLinks = { bluetoothTransport.start(); usbTransport.start() },
+        startLinks = { linkRegistry.start(); bluetoothTransport.start(); usbTransport.start() },
         stopLinks = { bluetoothTransport.stop(); usbTransport.stop(); linkRegistry.close() },
     )
 }

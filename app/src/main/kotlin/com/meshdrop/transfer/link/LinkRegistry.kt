@@ -23,18 +23,29 @@ class LinkRegistry(private val scope: CoroutineScope, private val receive: suspe
         messages.update { it + (kind to StrategyStatus(advertising = active, scanning = active, note = note)) }
     }
 
-    fun attach(id: String, kind: DiscoveryKind, input: InputStream, output: OutputStream, closeable: Closeable, initiator: Boolean) {
+    @Volatile private var accepting = true
+    @Synchronized fun start() { accepting = true }
+
+    @Synchronized fun attach(id: String, kind: DiscoveryKind, input: InputStream, output: OutputStream, closeable: Closeable, initiator: Boolean) {
+        if (!accepting) { closeable.close(); return }
         detach(id)
-        val link = FramedLink(input, output, closeable, initiator, { connection ->
+        lateinit var link: FramedLink
+        link = FramedLink(input, output, closeable, initiator, { connection ->
             scope.launch(Dispatchers.IO) { receive(connection) }
         }, {
-            devices.update { it.filterNot { p -> p.linkId == id } }
+            synchronized(this) {
+                if (links.remove(id, link)) {
+                    devices.update { it.filterNot { p -> p.linkId == id } }
+                    status(kind, "Link disconnected")
+                }
+            }
         })
         links[id] = link
         scope.launch(Dispatchers.IO) {
             runCatching {
                 while (isActive && links[id] === link) {
-                    val peer = link.open().use {
+                    val probe = try { link.open() } catch (_: FramedLink.BusyException) { delay(500); continue }
+                    val peer = probe.use {
                         it.getOutputStream().writeRequest("GET", TransferProtocol.PATH_PING)
                         val reply = BufferedInputStream(it.getInputStream()).readResponse()
                         require(reply.isSuccessful)
@@ -49,8 +60,8 @@ class LinkRegistry(private val scope: CoroutineScope, private val receive: suspe
         }
     }
 
-    fun detach(id: String) { links.remove(id)?.close(); devices.update { it.filterNot { p -> p.linkId == id } } }
-    fun close() { links.keys.toList().forEach(::detach) }
+    @Synchronized fun detach(id: String) { links.remove(id)?.close(); devices.update { it.filterNot { p -> p.linkId == id } } }
+    @Synchronized fun close() { accepting = false; links.keys.toList().forEach(::detach) }
     override fun open(peer: PeerDevice, register: (DuplexConnection) -> Unit): DuplexConnection {
         val id = peer.linkId ?: return ConnectionFactory.TCP.open(peer, register)
         val channel = (links[id] ?: error("Reconnect ${peer.name} before retrying")).open()

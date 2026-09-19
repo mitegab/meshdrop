@@ -21,6 +21,9 @@ class FramedLink(
     private val onClosed: () -> Unit = {},
 ) : Closeable {
     private val channels = ConcurrentHashMap<Int, Channel>()
+    private var lastRemoteId = 0
+    val isOpen: Boolean get() = !closed.get()
+    class BusyException : IllegalStateException("Link has too many active requests")
     private val nextId = AtomicInteger(if (initiator) 1 else 2)
     private val closed = AtomicBoolean()
     private val writerLock = Any()
@@ -45,7 +48,8 @@ class FramedLink(
                     val body = ByteArray(size).also { source.readFully(it) }
                     when (type) {
                         OPEN -> {
-                            require(size == 0 && (id % 2 == 1) != initiator)
+                            require(size == 0 && (id % 2 == 1) != initiator && id > lastRemoteId)
+                            lastRemoteId = id
                             val channel = synchronized(channels) {
                                 require(!channels.containsKey(id))
                                 if (channels.size >= MAX_CHANNELS) null else Channel(id).also { channels[id] = it }
@@ -77,7 +81,7 @@ class FramedLink(
     fun open(): DuplexConnection {
         check(ready.await(10, TimeUnit.SECONDS) && !closed.get()) { "Link handshake did not complete" }
         synchronized(channels) {
-            check(channels.size < MAX_CHANNELS) { "Link has too many active requests" }
+            if (channels.size >= MAX_CHANNELS) throw BusyException()
             val id = nextId.getAndAdd(2)
             check(id > 0) { "Link stream IDs exhausted; reconnect" }
             val channel = Channel(id)

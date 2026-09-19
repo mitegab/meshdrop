@@ -81,7 +81,7 @@ class SettingsViewModel(
     fun bluetoothDevices() = bluetoothTransport?.pairedDevices().orEmpty()
     fun usbDevices() = usbTransport?.attached().orEmpty()
     fun connectBluetooth(address: String) { viewModelScope.launch {
-        controller.start(); bluetoothTransport?.connect(address); showMessage("Connecting over RFCOMM…")
+        controller.start(); bluetoothTransport?.start(); bluetoothTransport?.connect(address); showMessage("Connecting over RFCOMM…")
     } }
     fun connectUsb(id: String) { viewModelScope.launch {
         controller.start(); usbTransport?.connect(id); showMessage("Approve USB access on the system prompt")

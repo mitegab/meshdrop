@@ -105,7 +105,7 @@ class MeshTransferTest {
             a.helper = true; b.helper = true; a.known = listOf(destination.peer); b.known = listOf(destination.peer)
             val identity = InMemoryIdentity(); val trusted = trust(destination.identity)
             val bytes = ByteArray(MeshManifest.CHUNK_BYTES * 2 + 97) { (it % 251).toByte() }
-            val source = PayloadSource { bytes.inputStream() to bytes.size.toLong() }
+            val source = PayloadSource { file -> if (file.id == "empty") ByteArray(0).inputStream() to 0L else bytes.inputStream() to bytes.size.toLong() }
             val connections = ConnectionFactory { peer, register ->
                 check(peer.id in setOf("a", "b")) { "Source attempted to bypass helpers" }
                 ConnectionFactory.TCP.open(peer, register)
@@ -113,11 +113,12 @@ class MeshTransferTest {
             val sender = MeshSender(temp.newFolder("out"), source, identity, trusted, connections, { listOf(a.peer, b.peer) })
             var contributions = emptyList<PeerContribution>()
             val outcome = withContext(Dispatchers.IO) { sender.send(destination.peer.copy(host = null, port = 0), "swarm", "sender", "Sender",
-                listOf(TransferFile("file", "file.bin", bytes.size.toLong())), listOf(listOf("a"), listOf("b")),
+                listOf(TransferFile("file", "file.bin", bytes.size.toLong()), TransferFile("empty", "empty.bin", 0)), listOf(listOf("a"), listOf("b")),
                 BatchCrypto(SessionNegotiator(identity, trusted), EndpointRole.SENDER),
                 onProgress = { _, _, _, peers -> contributions = peers }) }
             assertTrue(outcome.isSuccess)
             assertArrayEquals(bytes, destination.received["file.bin"])
+            assertArrayEquals(ByteArray(0), destination.received["empty.bin"])
             assertEquals(2, contributions.count { it.bytesDelivered > 0 })
             assertEquals(1, a.consents.get()); assertEquals(1, b.consents.get())
             assertTrue(a.received.isEmpty()); assertTrue(b.received.isEmpty())

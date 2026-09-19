@@ -112,7 +112,6 @@ class MeshReceiver(
                     handler.onFileCompleted(manifest.id, file.id, saved.getString("uri"), saved.getString("name"))
                 } else {
                     file.chunks.indices.forEach { present(session, file, it) }
-                    finishIfReady(session, file)
                 }
             }
             return receipt(session, JSONObject().put("token", session.token).put("accepted", true)
@@ -120,13 +119,18 @@ class MeshReceiver(
         } finally { offering.remove(manifest.id, cancelled) }
     }
 
-    private fun status(session: Session): JSONObject = receipt(session, JSONObject().put("files", JSONObject().apply {
+    private fun status(session: Session): JSONObject {
+        // Offer must return the receiver's key before either side can compare codes.
+        // Recover/assemble (including empty files) only after the readiness gate above.
+        session.manifest.files.forEach { finishIfReady(session, it) }
+        return receipt(session, JSONObject().put("files", JSONObject().apply {
         session.manifest.files.forEach { file ->
             put(file.id, JSONObject().put("complete", session.receipts.has(file.id)).put("chunks", JSONArray().apply {
                 if (!session.receipts.has(file.id)) file.chunks.indices.filter { present(session, file, it) }.forEach { put(it) }
             }))
         }
     }))
+    }
 
     private fun acceptChunk(session: Session, body: JSONObject): JSONObject {
         val file = session.manifest.files.firstOrNull { it.id == body.getString("fileId") } ?: error("Unknown file")
