@@ -59,10 +59,15 @@ These are NOT checked off by the discovery adapters, a UI label or the existing 
   membership compile errors; explicit `containsKey` calls fixed them.
 - Commit `8b7521a`: [Android CI run 35462619306](https://github.com/mitegab/meshdrop/actions/runs/35462619306)
   passed **assembleDebug** and **testDebugUnitTest**, and uploaded the debug APK.
-- Final regression additions include encrypted prefix resume with fresh keys, receiving cancellation,
-  strict manifest parsing, readiness negotiation, malformed HTTP, BLE packet encoding, pairing,
-  spoofed remembered fingerprints, and IP-route classification. Final CI result is recorded below
-  after those additions run.
+- The encrypted-resume regression exposed a reply-before-writer-release race in run
+  `35462963784`. Upload replies are now published only after private writer state is settled.
+- Final code commit `88e491d`: [Android CI run 35463663448](https://github.com/mitegab/meshdrop/actions/runs/35463663448)
+  passed **assembleDebug** and **testDebugUnitTest**, and uploaded the debug APK.
+- The final suite covers encrypted prefix resume with fresh keys, in-flight receive cancellation,
+  pending-approval cancellation on stop, strict manifest parsing, readiness negotiation, malformed
+  HTTP, BLE packet encoding/local-address limits, pairing, spoofed remembered fingerprints and
+  IP-route classification. The suite contains 292 JVM test methods across 36 test files.
+- `git diff --check` passed and the Android manifest was parsed successfully as XML locally.
 
 Automated success is not a claim that Wi-Fi P2P, BLE, USB tethering or Android MediaStore have
 been exercised on physical hardware in this environment.
