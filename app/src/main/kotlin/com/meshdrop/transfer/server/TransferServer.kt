@@ -61,7 +61,9 @@ class TransferServer(
     private var acceptJob: Job? = null
 
     /** batchId → state of that batch (accepted? which files landed?). */
+    var meshService: com.meshdrop.transfer.mesh.MeshService? = null
     private val batches = ConcurrentHashMap<String, BatchState>()
+    private val journal = fileStore.partialDirectory?.let { com.meshdrop.core.persistence.ReceiveJournal(it) }
     private val connections = ConcurrentHashMap.newKeySet<DuplexConnection>()
     private val uploads = ConcurrentHashMap<DuplexConnection, String>()
     private val handshakes = ConcurrentHashMap.newKeySet<String>()
@@ -73,9 +75,9 @@ class TransferServer(
     val isRunning: Boolean get() = serverSocket?.isClosed == false
 
     /** Binds an ephemeral port and starts serving. Returns the port, or 0 on failure. */
-    fun start(): Int {
+    fun start(requestedPort: Int = 0): Int {
         if (isRunning) return port
-        val socket = runCatching { ServerSocket(0, BACKLOG) }
+        val socket = runCatching { ServerSocket(requestedPort, BACKLOG) }
             .onFailure { MeshLog.e(TAG, "Cannot bind a local port", it) }
             .getOrNull() ?: return 0
         serverSocket = socket
@@ -92,7 +94,10 @@ class TransferServer(
         acceptJob = null
         port = 0
         connections.forEach { it.closeQuietly() }
-        batches.keys.toList().forEach(::forget)
+        // Stopping is not cancellation: keep verified prefixes for a fresh approval after restart.
+        batches.values.forEach { checkpoint(it) }
+        batches.clear()
+        meshService?.stop()
         MeshLog.i(TAG, "Transfer server stopped")
     }
 
@@ -138,6 +143,7 @@ class TransferServer(
             }
             MeshLog.v(TAG, "${head.method} ${head.path} (${head.contentLength} bytes)")
             when {
+                meshService?.handle(head, input, output) == true -> Unit
                 head.method == "GET" && head.path == TransferProtocol.PATH_PING -> {
                     output.writeJson(200, "OK", ControlMessages.ping(deviceId(), deviceName()))
                 }
@@ -201,7 +207,7 @@ class TransferServer(
         }
 
         // Interrupted bytes expire instead of filling the private cache indefinitely.
-        val cutoff = System.currentTimeMillis() - 30 * 60_000L
+        val cutoff = System.currentTimeMillis() - com.meshdrop.core.persistence.ReceiveJournal.RETENTION_MS
         batches.entries.filter { it.value.lastActivity < cutoff && it.value.writing.isEmpty() && it.key !in handshakes }
             .forEach { forget(it.key) }
         if (!batches.containsKey(request.batchId) && batches.size >= 64) {
@@ -217,7 +223,7 @@ class TransferServer(
             return
         }
         try {
-            val previous = batches[request.batchId]
+            val previous = batches[request.batchId] ?: restore(request.batchId)
             if (previous != null && (previous.request.senderId != request.senderId ||
                     previous.fingerprint != request.security?.fingerprint ||
                     previous.request.files.map { listOf(it.id, it.name, it.sizeBytes, it.mimeType) } !=
@@ -256,7 +262,10 @@ class TransferServer(
             when (accepted) {
                 true -> {
                     if (!isRunning) return
-                    batches[request.batchId] = previous ?: BatchState(incoming, request.security?.fingerprint)
+                    val acceptedBatch = previous ?: BatchState(incoming, request.security?.fingerprint)
+                    batches[request.batchId] = acceptedBatch
+                    checkpoint(acceptedBatch)
+                    acceptedBatch.receipts.forEach { (id, receipt) -> handler.onFileCompleted(request.batchId, id, receipt.first, receipt.second) }
                     output.writeJson(200, "OK", with(ControlMessages) {
                         HandshakeResponse(HandshakeResponse.Decision.ACCEPTED,
                             security = handler.localMaterialFor(request.batchId)?.toDto(),
@@ -342,6 +351,7 @@ class TransferServer(
                 return
             }
             val part = batch.partials.getOrPut(fileId) { fileStore.createPartial() }
+            checkpoint(batch) // publish the part's identity before writing any payload bytes
             val stream = runCatching { part.append(offset, head.header(TransferProtocol.HEADER_PREFIX_DIGEST)) }
                 .getOrElse {
                     output.writeError(409, "Conflict", it.message ?: "Resume prefix changed")
@@ -379,6 +389,8 @@ class TransferServer(
                 batch.digests[fileId] = digest
                 synchronized(batch) { batch.bytesWritten += part.size }
                 batch.completed += fileId
+                batch.receipts[fileId] = uri to sink.displayName
+                checkpoint(batch)
                 batch.partials.remove(fileId)?.discard()
                 handler.onFileCompleted(batchId, fileId, uri.toString(), sink.displayName)
                 output.writeJson(200, "OK", uploadAckJson(UploadAck(
@@ -396,6 +408,7 @@ class TransferServer(
             }
         } finally {
             batch.writing.remove(fileId)
+            if (!batch.cancelled) checkpoint(batch)
         }
     }
 
@@ -481,6 +494,8 @@ class TransferServer(
 
     /** Drops a batch (used when the user cancels a download). */
     fun forget(batchId: String) {
+        meshService?.cancel(batchId)
+        journal?.remove(batchId)
         val batch = batches.remove(batchId)
         if (batch != null) {
             batch.cancelled = true
@@ -493,6 +508,44 @@ class TransferServer(
 
     private fun DuplexConnection.closeQuietly() = runCatching { close() }
 
+    private fun checkpoint(batch: BatchState) {
+        if (batch.cancelled || journal == null) return
+        synchronized(batch) {
+            val json = org.json.JSONObject().put("senderId", batch.request.senderId).put("senderName", batch.request.senderName)
+                .put("fingerprint", batch.fingerprint ?: "").put("files", com.meshdrop.core.persistence.JournalCodec.files(batch.request.files))
+                .put("touched", batch.lastActivity).put("bytes", batch.bytesWritten)
+                .put("parts", org.json.JSONObject().apply { batch.partials.forEach { (id, part) -> if (id !in batch.completed) put(id, part.file.name) } })
+                .put("receipts", org.json.JSONObject().apply { batch.receipts.forEach { (id, receipt) ->
+                    put(id, org.json.JSONObject().put("uri", receipt.first).put("name", receipt.second).put("digest", batch.digests[id]))
+                } })
+            journal.write(batch.request.batchId, json)
+        }
+    }
+
+    private fun restore(id: String): BatchState? = runCatching {
+        val json = journal?.read(id) ?: return null
+        val directory = fileStore.partialDirectory ?: return null
+        val files = com.meshdrop.core.persistence.JournalCodec.files(json.getJSONArray("files"))
+        val request = IncomingRequest(id, json.getString("senderId"), json.getString("senderName"), "", files, files.sumOf { it.sizeBytes })
+        val batch = BatchState(request, json.optString("fingerprint").ifBlank { null })
+        val parts = json.getJSONObject("parts")
+        parts.keys().forEach { fileId ->
+            val meta = files.firstOrNull { it.id == fileId } ?: error("Journal file not in manifest")
+            val part = PartialFile.restore(directory, parts.getString(fileId)) ?: return@forEach
+            if (meta.sizeBytes == 0L || part.size <= meta.sizeBytes) batch.partials[fileId] = part else part.discard()
+        }
+        val receipts = json.getJSONObject("receipts")
+        receipts.keys().forEach { fileId ->
+            require(files.any { it.id == fileId })
+            val receipt = receipts.getJSONObject(fileId)
+            batch.completed += fileId
+            batch.digests[fileId] = receipt.getString("digest")
+            batch.receipts[fileId] = receipt.getString("uri") to receipt.getString("name")
+        }
+        batch.bytesWritten = json.optLong("bytes")
+        batch
+    }.onFailure { MeshLog.w(TAG, "Discarding corrupt receive journal", it) }.getOrNull()
+
     private class BatchState(
         val request: IncomingRequest,
         val fingerprint: String?,
@@ -500,6 +553,7 @@ class TransferServer(
         /** fileId → SHA-256 of what landed, for the end-of-batch comparison. */
         val digests: MutableMap<String, String> = ConcurrentHashMap(),
     ) {
+        val receipts = ConcurrentHashMap<String, Pair<String, String>>()
         val partials = ConcurrentHashMap<String, PartialFile>()
         val writing = ConcurrentHashMap.newKeySet<String>()
         @Volatile var lastActivity = System.currentTimeMillis()

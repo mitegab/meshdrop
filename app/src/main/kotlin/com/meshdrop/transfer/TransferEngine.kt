@@ -100,6 +100,7 @@ class TransferEngine(
      * the discovery layer (and so tests can hand it a fixed list).
      */
     private val alternativeRoutes: (String) -> List<PeerDevice> = { emptyList() },
+    private val sendJournal: com.meshdrop.core.persistence.SendJournal? = null,
     private val connectionFactory: com.meshdrop.transfer.link.ConnectionFactory = com.meshdrop.transfer.link.ConnectionFactory.TCP,
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : IncomingTransferHandler {
@@ -123,6 +124,9 @@ class TransferEngine(
      * the last known [PeerDevice] is kept here and re-resolved if it has moved.
      */
     private val batchPeers = ConcurrentHashMap<String, PeerDevice>()
+    var meshSender: com.meshdrop.transfer.mesh.MeshSender? = null
+    fun configureMesh(service: com.meshdrop.transfer.mesh.MeshService) { server.meshService = service }
+    private val meshRoutes = ConcurrentHashMap<String, List<List<String>>>()
     private val batchManifests = ConcurrentHashMap<String, List<TransferFile>>()
 
     /** Guarded by [queueLock]: pumped from the send path, from job completion and from cancel. */
@@ -184,6 +188,19 @@ class TransferEngine(
     private val _jobs = MutableStateFlow<List<TransferJob>>(emptyList())
     val jobs: StateFlow<List<TransferJob>> = _jobs.asStateFlow()
 
+    init {
+        // SAF grants are already persisted by the picker. Recovery never silently sends files:
+        // it presents interrupted queue entries for an explicit Retry and fresh peer approval.
+        sendJournal?.all()?.forEach { saved ->
+            batchPeers[saved.id] = saved.peer
+            batchManifests[saved.id] = saved.files
+            meshRoutes[saved.id] = saved.routes
+            _jobs.update { it + TransferJob(saved.id, TransferDirection.SEND, saved.peer.name, saved.peer.id,
+                saved.files, totalBytes = saved.files.sumOf { file -> file.sizeBytes }, status = TransferStatus.FAILED,
+                message = "Recovered after restart — Retry to re-open files and re-approve", finishedAtMillis = now()) }
+        }
+    }
+
     private val _incoming = MutableStateFlow<List<IncomingRequest>>(emptyList())
     val incoming: StateFlow<List<IncomingRequest>> = _incoming.asStateFlow()
 
@@ -220,7 +237,8 @@ class TransferEngine(
      * Pushes [files] to [peer]. Returns immediately with the job id: the transfer itself
      * runs in the background and reports through [jobs].
      */
-    suspend fun send(peer: PeerDevice, files: List<TransferFile>): String = withContext(Dispatchers.Default) {
+    suspend fun send(peer: PeerDevice, files: List<TransferFile>, helperRoutes: List<List<String>> = emptyList()): String = withContext(Dispatchers.Default) {
+        require(helperRoutes.isEmpty() || encryptionEnabled()) { "Helper delivery requires end-to-end encryption" }
         val jobId = UUID.randomUUID().toString()
         val job = TransferJob(
             id = jobId,
@@ -254,6 +272,8 @@ class TransferEngine(
 
         batchPeers[jobId] = peer
         batchManifests[jobId] = files.toList()
+        meshRoutes[jobId] = helperRoutes
+        sendJournal?.put(com.meshdrop.core.persistence.QueuedSnapshot(jobId, peer, files, helperRoutes))
         enqueue(PendingSend(QueuedTransfer(jobId, peer.id, job.totalBytes, now()), peer, files))
         jobId
     }
@@ -344,6 +364,27 @@ class TransferEngine(
         }
     }
 
+    private suspend fun runMeshJob(jobId: String, peer: PeerDevice, files: List<TransferFile>) {
+        try {
+            val sender = meshSender ?: error("Helper delivery is unavailable")
+            val crypto = batchCrypto[jobId] ?: error("Encryption must be enabled for helper delivery")
+            val outcome = sender.send(peer, jobId, localDeviceId, localDeviceName(), files,
+                requireNotNull(meshRoutes[jobId]), crypto, isCancelled = { jobId in cancelled },
+                onSecurity = { recordSecurity(jobId); check(awaitVerification(jobId)) { "Verify the destination first" } },
+                onProgress = { fileId, bytes, total, contributions ->
+                    reportSendProgress(jobId, fileId, bytes, total, 0L)
+                    updateJob(jobId, force = true) { it.copy(lane = com.meshdrop.core.model.TransportLane.RELAY,
+                        contributions = contributions, files = it.files.map { f ->
+                            if (f.id == fileId) f.copy(status = TransferStatus.IN_PROGRESS, bytesTransferred = bytes, sizeBytes = total) else f
+                        }) }
+                })
+            outcome.outcomes.forEach { setFileStatus(jobId, it.fileId, if (it.success) TransferStatus.COMPLETED else TransferStatus.FAILED) }
+            finishJob(jobId, if (outcome.isSuccess) TransferStatus.COMPLETED else TransferStatus.FAILED, outcome.message)
+        } catch (error: Exception) {
+            finishJob(jobId, if (jobId in cancelled) TransferStatus.CANCELLED else TransferStatus.FAILED, error.message)
+        }
+    }
+
     private suspend fun runSendJob(
         jobId: String,
         peer: PeerDevice,
@@ -351,6 +392,10 @@ class TransferEngine(
         resume: Boolean = false,
     ) {
         updateJob(jobId, force = true) { it.copy(status = TransferStatus.IN_PROGRESS) }
+        if (!meshRoutes[jobId].isNullOrEmpty()) {
+            runMeshJob(jobId, peer, files)
+            return
+        }
 
         // Watched separately from the transfer: the copy loop only reports while bytes move,
         // and the case we care about is precisely the one where they stop.
@@ -671,7 +716,7 @@ class TransferEngine(
     fun confirmSafetyCode(batchId: String, peerLabel: String) {
         val keys = batchCrypto[batchId]?.sessionKeys() ?: return
         if (!keys.signatureValid) return
-        negotiator.trustPeer(keys.peerFingerprint, peerLabel)
+        negotiator.trustPeer(keys.peerIdentityFingerprint ?: keys.peerFingerprint, peerLabel)
         updateSecurity(batchId) { it.copy(codeCompared = true, peerRemembered = true) }
         MeshLog.i(TAG, "User verified $peerLabel (${keys.peerFingerprint})")
     }
@@ -756,6 +801,7 @@ class TransferEngine(
         MeshLog.i(TAG, "Cancelling $jobId")
         cancelled += jobId
         client.abort(jobId)
+        meshSender?.discard(jobId)
         synchronized(queueLock) { pendingSends.remove(jobId) }
         pumpQueue()
         server.forget(jobId)
@@ -828,6 +874,7 @@ class TransferEngine(
     }
 
     private fun finishJob(jobId: String, status: TransferStatus, message: String?) {
+        if (status == TransferStatus.COMPLETED || status == TransferStatus.CANCELLED || status == TransferStatus.REJECTED) sendJournal?.remove(jobId)
         speedTracker.forget(jobId)
         synchronized(queueLock) { pendingSends.remove(jobId) }
         updateJob(jobId, force = true) { job ->

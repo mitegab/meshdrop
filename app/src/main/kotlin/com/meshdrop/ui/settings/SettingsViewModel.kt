@@ -36,6 +36,7 @@ class SettingsViewModel(
     private val identityFingerprint: () -> String = { "" },
     private val bluetoothTransport: com.meshdrop.transport.BluetoothTransport? = null,
     private val usbTransport: com.meshdrop.transport.UsbTransport? = null,
+    private val relay: com.meshdrop.transfer.mesh.RelayService? = null,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -68,6 +69,12 @@ class SettingsViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUiState())
 
+    val helperMode = preferences.helperMode
+    val relayOffers = relay?.incoming ?: MutableStateFlow(emptyList<com.meshdrop.transfer.mesh.RelayConsent>())
+    fun setHelperMode(enabled: Boolean) { preferences.setHelperMode(enabled); if (!enabled) relay?.revokeAll() }
+    fun decideRelay(id: String, accept: Boolean) { relay?.decide(id, accept) }
+    fun revokeRelays() { relay?.revokeAll(); showMessage("All helper permissions revoked") }
+
     val localPort: Int get() = controller.localPort
     val strategyStatuses = controller.strategyStatuses
 
@@ -91,12 +98,12 @@ class SettingsViewModel(
     fun trustPairingCode(code: String): Boolean {
         val info = com.meshdrop.core.pairing.PairingPayload.decode(code)
         val fingerprint = info?.fingerprint?.lowercase().orEmpty()
-        if (info == null || !fingerprint.matches(Regex("[a-f0-9]{12}")) ||
+        if (info == null || !fingerprint.matches(Regex("([a-f0-9]{12}|[a-f0-9]{64})")) ||
             !com.meshdrop.transfer.protocol.ProtocolVersions.isSupported(info.protocolVersion)) {
             showMessage("Invalid or unsupported pairing code")
             return false
         }
-        verifiedPeers.remember(fingerprint.chunked(2).joinToString(":"), info.deviceName)
+        verifiedPeers.remember(if (fingerprint.length == 12) fingerprint.chunked(2).joinToString(":") else fingerprint, info.deviceName)
         showMessage("Trusted ${info.deviceName}. Future transfers must prove this identity.")
         return true
     }

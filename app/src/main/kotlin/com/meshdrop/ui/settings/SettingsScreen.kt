@@ -72,6 +72,8 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val helperMode by viewModel.helperMode.collectAsStateWithLifecycle()
+    val relayOffers by viewModel.relayOffers.collectAsStateWithLifecycle()
     val colors = MeshTheme.colors
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -140,6 +142,19 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.displayMedium,
                         color = colors.ink,
                     )
+                }
+            }
+
+            item(key = "helpers") {
+                ToggleRow(title = "Helper mode", subtitle = "Off by default. Ask before each encrypted relay route: up to 3 hops, 1 GiB per grant, 32 MiB cache, 2 forwards at once.",
+                    checked = helperMode, onCheckedChange = viewModel::setHelperMode)
+                TextButton(onClick = viewModel::revokeRelays) { Text("Revoke all relay permissions") }
+                relayOffers.forEach { offer ->
+                    Text("${offer.senderFingerprint} requests ${offer.bytes / (1024 * 1024)} MiB via ${offer.nextPeer}")
+                    Row {
+                        TextButton(onClick = { viewModel.decideRelay(offer.id, true) }) { Text("Allow this route") }
+                        TextButton(onClick = { viewModel.decideRelay(offer.id, false) }) { Text("Decline") }
+                    }
                 }
             }
 

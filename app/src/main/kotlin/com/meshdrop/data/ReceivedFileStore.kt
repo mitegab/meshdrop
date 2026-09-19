@@ -22,14 +22,11 @@ class ReceivedFileStore(private val context: Context) : IncomingFileStore {
 
     private val resolver get() = context.contentResolver
 
-    // Private partials are session-scoped. Orphans from a killed process are never published.
-    private val stagingDirectory = File(context.cacheDir, "incoming").apply {
-        mkdirs()
-        listFiles()?.filter { it.name.endsWith(".part") }?.forEach { it.delete() }
-    }
+    // Durable private bytes; a retry always re-approves and re-verifies their prefix.
+    override val partialDirectory = File(context.filesDir, "incoming").apply { mkdirs() }
 
     override fun createPartial(): com.meshdrop.core.resume.PartialFile =
-        com.meshdrop.core.resume.PartialFile(stagingDirectory)
+        com.meshdrop.core.resume.PartialFile(partialDirectory)
 
     /**
      * Opens somewhere to write [requestedName].

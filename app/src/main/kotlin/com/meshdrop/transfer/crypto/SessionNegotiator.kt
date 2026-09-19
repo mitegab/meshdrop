@@ -41,6 +41,8 @@ data class SessionKeys(
     /** True when the peer proved it owns the identity key it claims. */
     val signatureValid: Boolean,
     val cipherSuite: String,
+    /** Full identity pin; the short fingerprint is only a human-facing label. */
+    val peerIdentityFingerprint: String? = null,
 )
 
 /**
@@ -127,9 +129,11 @@ class SessionNegotiator(
             nonceSalt = transcript.copyOfRange(0, 4),
             safetyCode = safetyCode(sasBytes),
             peerFingerprint = fingerprint,
-            peerRemembered = signatureValid && rememberedPeers.isVerified(fingerprint),
+            peerRemembered = signatureValid && (rememberedPeers.isVerified(fingerprint) ||
+                rememberedPeers.isVerified(com.meshdrop.core.persistence.AtomicJson.digest(peer.identityPublicKey))),
             signatureValid = signatureValid,
             cipherSuite = EncryptionMode.E2E_AES_256_GCM.cipherSuite ?: "unknown",
+            peerIdentityFingerprint = com.meshdrop.core.persistence.AtomicJson.digest(peer.identityPublicKey),
         )
     }
 

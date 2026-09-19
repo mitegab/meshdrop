@@ -39,6 +39,8 @@ import java.util.concurrent.ConcurrentHashMap
 data class DropUiState(
     /** Files staged in the tray, in the order they were picked. */
     val staged: List<TransferFile> = emptyList(),
+    val helperMode: String = "direct",
+    val helpers: List<String> = emptyList(),
     /** The person the tray is addressed to, if any. */
     val peer: PeerDevice? = null,
     /** Batch id of the transfer currently on screen, for the queue readout. */
@@ -81,6 +83,7 @@ data class DropUiState(
 class DropViewModel(
     private val controller: MeshController,
     private val documents: DocumentRepository,
+    private val relay: com.meshdrop.transfer.mesh.RelayService? = null,
 ) : ViewModel() {
 
     /** One smoother per batch, so two simultaneous transfers do not average each other. */
@@ -88,6 +91,14 @@ class DropViewModel(
 
     private val _ui = MutableStateFlow(DropUiState(peer = controller.selectedPeer))
     val ui: StateFlow<DropUiState> = _ui.asStateFlow()
+
+    val relayOffers = relay?.incoming ?: MutableStateFlow(emptyList<com.meshdrop.transfer.mesh.RelayConsent>())
+    fun decideRelay(id: String, accept: Boolean) { relay?.decide(id, accept) }
+    fun helperMode(mode: String) { _ui.update { it.copy(helperMode = mode, helpers = emptyList()) } }
+    fun toggleHelper(id: String) { _ui.update {
+        val helpers = if (id in it.helpers) it.helpers - id else (it.helpers + id).take(if (it.helperMode == "swarm") 4 else 3)
+        it.copy(helpers = helpers)
+    } }
 
     val deviceName: StateFlow<String> = controller.deviceName
     val peers: StateFlow<List<PeerDevice>> = controller.rankedPeers
@@ -306,7 +317,7 @@ class DropViewModel(
      */
     fun choosePeer(peer: PeerDevice) {
         selectPeer(peer)
-        if (_ui.value.staged.isEmpty()) openPicker() else send()
+        if (_ui.value.staged.isEmpty()) openPicker() else if (_ui.value.helperMode == "direct") send()
     }
 
     fun send() {
@@ -319,7 +330,15 @@ class DropViewModel(
             files.isEmpty() -> _ui.update { it.copy(message = "Pick at least one file") }
             else -> viewModelScope.launch {
                 _ui.update { it.copy(connecting = true, message = if (peer.isReachable()) null else "Connecting to ${peer.name}; approve the system prompt on the other device") }
-                runCatching { controller.send(peer, files) }
+                runCatching {
+                    val routes = when (state.helperMode) {
+                        "swarm" -> state.helpers.filter { it != peer.id }.map { listOf(it) }
+                        "relay" -> listOf(state.helpers.filter { it != peer.id }).filter { it.isNotEmpty() }
+                        else -> emptyList()
+                    }
+                    require(state.helperMode == "direct" || routes.isNotEmpty()) { "Choose at least one distinct helper" }
+                    controller.send(peer, files, routes)
+                }
                     .onSuccess { jobId ->
                         // The tray is emptied the moment the bytes are the engine's problem:
                         // leaving the files staged invites a second copy of the same photo.

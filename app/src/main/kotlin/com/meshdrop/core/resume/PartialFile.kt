@@ -6,8 +6,8 @@ import java.io.InputStream
 import java.security.MessageDigest
 
 /** App-private staging. No caller-controlled name is used as a filesystem path. */
-class PartialFile(directory: File) {
-    val file: File = File.createTempFile("incoming-", ".part", directory.apply { mkdirs() })
+class PartialFile private constructor(val file: File, @Suppress("UNUSED_PARAMETER") restored: Boolean) {
+    constructor(directory: File) : this(File.createTempFile("incoming-", ".part", directory.apply { mkdirs() }), false)
     val size: Long get() = file.length()
 
     fun digest(): String = file.inputStream().use { digestPrefix(it, size) }
@@ -25,6 +25,13 @@ class PartialFile(directory: File) {
     fun discard() { file.delete() }
 
     companion object {
+        fun restore(directory: File, name: String): PartialFile? = runCatching {
+            require(name.matches(Regex("incoming-[A-Za-z0-9-]+\\.part")))
+            val file = File(directory, name)
+            require(file.canonicalFile.parentFile == directory.canonicalFile && file.isFile)
+            PartialFile(file, true)
+        }.getOrNull()
+
         /** Reads exactly the prefix, leaving the stream positioned at the resume offset. */
         fun digestPrefix(input: InputStream, length: Long, onRead: () -> Unit = {}): String {
             require(length >= 0)

@@ -70,6 +70,7 @@ class AppContainer(val application: Application) {
         autoAcceptVerified = { userPreferences.autoAcceptVerified.value },
         storageVolume = { storageVolume() },
         logSink = transferLogFile,
+        sendJournal = com.meshdrop.core.persistence.SendJournal(application.filesDir),
         connectionFactory = linkRegistry,
         alternativeRoutes = { deviceId: String -> meshController.alternativeRoutes(deviceId) },
     )
@@ -102,6 +103,17 @@ class AppContainer(val application: Application) {
     )
 
     val discoveryCoordinator = DiscoveryCoordinator(discoveryStrategies, applicationScope)
+
+    val meshService: com.meshdrop.transfer.mesh.MeshService = com.meshdrop.transfer.mesh.MeshService(
+        com.meshdrop.transfer.mesh.MeshReceiver(java.io.File(application.filesDir, "mesh-incoming"),
+            userPreferences.deviceId, { userPreferences.deviceName.value }, deviceIdentity, receivedFileStore, transferEngine),
+        com.meshdrop.transfer.mesh.RelayService(userPreferences.deviceId, java.io.File(application.cacheDir, "relay"),
+            { discoveryCoordinator.peers.value }, com.meshdrop.transfer.mesh.MeshRpc(linkRegistry), { userPreferences.helperMode.value }),
+    )
+    val meshSender = com.meshdrop.transfer.mesh.MeshSender(java.io.File(application.filesDir, "mesh-outgoing"),
+        com.meshdrop.transfer.client.AndroidPayloadSource(documentRepository, fileSpooler), deviceIdentity, verifiedPeers,
+        linkRegistry, { discoveryCoordinator.peers.value })
+    init { transferEngine.meshSender = meshSender; transferEngine.configureMesh(meshService) }
 
     val meshController = MeshController(
         preferences = userPreferences,

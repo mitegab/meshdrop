@@ -109,6 +109,7 @@ fun DropScreen(
     missingPermissions: List<String> = emptyList(),
     onRequestPermissions: () -> Unit = {},
 ) {
+    val relayOffers by viewModel.relayOffers.collectAsStateWithLifecycle()
     val colors = MeshTheme.colors
     val context = LocalContext.current
 
@@ -217,6 +218,36 @@ fun DropScreen(
                             )
                         }
                     }
+                }
+
+                items(items = relayOffers, key = { "relay-${it.id}" }) { offer ->
+                    Gutter { Column {
+                        Text("Help a transfer?", style = MaterialTheme.typography.titleMedium)
+                        Text("${offer.senderFingerprint} → ${offer.nextPeer} → ${offer.destinationId}\nUp to ${offer.bytes / (1024 * 1024)} MiB for 30 minutes. Encrypted chunks only.")
+                        Row {
+                            androidx.compose.material3.TextButton(onClick = { viewModel.decideRelay(offer.id, true) }) { Text("Allow this route") }
+                            androidx.compose.material3.TextButton(onClick = { viewModel.decideRelay(offer.id, false) }) { Text("Decline") }
+                        }
+                    } }
+                }
+                item(key = "delivery-route") {
+                    Gutter { Column {
+                        Text("Delivery", style = MaterialTheme.typography.titleSmall)
+                        Row { listOf("direct" to "Direct", "swarm" to "Swarm", "relay" to "Relay chain").forEach { (mode, label) ->
+                            androidx.compose.material3.TextButton(onClick = { viewModel.helperMode(mode) }) { Text(if (ui.helperMode == mode) "✓ $label" else label) }
+                        } }
+                        if (ui.helperMode != "direct") {
+                            Text("Pair with the final destination first. Helpers must enable Helper mode and approve each route.")
+                            Text(if (ui.helperMode == "swarm") "Select independent chunk sources:" else "Tap helpers in route order (up to 3):")
+                            peers.filter { it.id != ui.peer?.id }.forEach { helper ->
+                                androidx.compose.material3.TextButton(onClick = { viewModel.toggleHelper(helper.id) }) {
+                                    val index = ui.helpers.indexOf(helper.id)
+                                    Text((if (index >= 0) "${index + 1}. " else "+ ") + helper.name)
+                                }
+                            }
+                            Text("Final destination: ${ui.peer?.name ?: "choose below"}")
+                        }
+                    } }
                 }
 
                 item(key = "tray") {

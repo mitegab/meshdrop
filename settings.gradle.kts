@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "MeshDrop"
-include(":app")
+include(":app", ":cli")

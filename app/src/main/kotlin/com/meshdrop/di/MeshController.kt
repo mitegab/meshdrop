@@ -164,8 +164,8 @@ class MeshController(
 
     // region transfers --------------------------------------------------------------------
 
-    suspend fun send(peer: PeerDevice, files: List<TransferFile>): String =
-        engine.send(discovery.connect(peer), files)
+    suspend fun send(peer: PeerDevice, files: List<TransferFile>, helperRoutes: List<List<String>> = emptyList()): String =
+        engine.send(if (helperRoutes.isEmpty()) discovery.connect(peer) else peer, files, helperRoutes)
 
     fun approve(batchId: String) = engine.approve(batchId)
 

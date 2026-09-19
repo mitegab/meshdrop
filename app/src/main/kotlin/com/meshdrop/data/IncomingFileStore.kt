@@ -5,6 +5,7 @@ import java.io.OutputStream
 
 /** Storage boundary for the receiver; network tests do not need Android's MediaStore. */
 interface IncomingFileStore {
+    val partialDirectory: java.io.File? get() = null
     fun createPartial(): PartialFile
     fun createSink(requestedName: String, mimeType: String?): ReceivedFileSink
 }
