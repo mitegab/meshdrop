@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.meshdrop.core.prefs.UserPreferences
 import com.meshdrop.di.MeshController
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +33,7 @@ class SettingsViewModel(
     private val preferences: UserPreferences,
     private val controller: MeshController,
     private val verifiedPeers: com.meshdrop.transfer.crypto.VerifiedPeers,
+    private val identityFingerprint: () -> String = { "" },
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -65,6 +67,28 @@ class SettingsViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUiState())
 
     val localPort: Int get() = controller.localPort
+    val strategyStatuses = controller.strategyStatuses
+
+    fun pairingCode(): String? {
+        if (localPort <= 0 || identityFingerprint().isBlank()) return null
+        return com.meshdrop.core.pairing.PairingPayload.encode(com.meshdrop.core.pairing.PairingInfo(
+            preferences.deviceId, preferences.deviceName.value, localPort, identityFingerprint(),
+            com.meshdrop.transfer.protocol.TransferProtocol.VERSION,
+        ))
+    }
+
+    fun trustPairingCode(code: String): Boolean {
+        val info = com.meshdrop.core.pairing.PairingPayload.decode(code)
+        val fingerprint = info?.fingerprint?.lowercase().orEmpty()
+        if (info == null || !fingerprint.matches(Regex("[a-f0-9]{12}")) ||
+            !com.meshdrop.transfer.protocol.ProtocolVersions.isSupported(info.protocolVersion)) {
+            showMessage("Invalid or unsupported pairing code")
+            return false
+        }
+        verifiedPeers.remember(fingerprint.chunked(2).joinToString(":"), info.deviceName)
+        showMessage("Trusted ${info.deviceName}. Future transfers must prove this identity.")
+        return true
+    }
 
     /**
      * Devices we have compared safety codes with, fingerprint → label.
@@ -104,7 +128,13 @@ class SettingsViewModel(
         )
     }
 
-    fun setDeviceName(name: String) = preferences.setDeviceName(name)
+    fun setDeviceName(name: String) {
+        preferences.setDeviceName(name)
+        viewModelScope.launch {
+            runCatching { controller.reAdvertise() }
+                .onFailure { showMessage("Name saved; refresh nearby devices to advertise it") }
+        }
+    }
 
     fun forgetPeer(fingerprint: String) {
         verifiedPeers.forget(fingerprint)

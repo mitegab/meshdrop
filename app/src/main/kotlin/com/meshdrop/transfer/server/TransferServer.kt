@@ -1,12 +1,14 @@
 package com.meshdrop.transfer.server
 
+import com.meshdrop.core.resume.PartialFile
+import com.meshdrop.transfer.protocol.PartialStatus
 import com.meshdrop.core.integrity.StreamingDigest
 import com.meshdrop.core.integrity.toHex
 import com.meshdrop.core.model.IncomingRequest
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.util.MeshLog
 import com.meshdrop.data.ReceivedFileSink
-import com.meshdrop.data.ReceivedFileStore
+import com.meshdrop.data.IncomingFileStore
 import com.meshdrop.transfer.crypto.SecureFrames
 import com.meshdrop.transfer.crypto.SecurityOffer
 import com.meshdrop.transfer.crypto.SessionKeys
@@ -53,7 +55,7 @@ import java.util.concurrent.ConcurrentHashMap
  * own coroutine on [Dispatchers.IO].
  */
 class TransferServer(
-    private val fileStore: ReceivedFileStore,
+    private val fileStore: IncomingFileStore,
     private val handler: IncomingTransferHandler,
     private val scope: CoroutineScope,
     private val deviceId: () -> String,
@@ -65,6 +67,9 @@ class TransferServer(
 
     /** batchId → state of that batch (accepted? which files landed?). */
     private val batches = ConcurrentHashMap<String, BatchState>()
+    private val connections = ConcurrentHashMap.newKeySet<Socket>()
+    private val uploads = ConcurrentHashMap<Socket, String>()
+    private val handshakes = ConcurrentHashMap.newKeySet<String>()
 
     @Volatile
     var port: Int = 0
@@ -91,6 +96,8 @@ class TransferServer(
         acceptJob?.cancel()
         acceptJob = null
         port = 0
+        connections.forEach { it.closeQuietly() }
+        batches.keys.toList().forEach(::forget)
         MeshLog.i(TAG, "Transfer server stopped")
     }
 
@@ -100,6 +107,11 @@ class TransferServer(
                 if (!socket.isClosed) MeshLog.w(TAG, "accept() failed", error)
                 return
             }
+            if (connections.size >= 32 || socket.isClosed) {
+                client.closeQuietly()
+                continue
+            }
+            connections += client
             client.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
             client.tcpNoDelay = true
             scope.launch(Dispatchers.IO) { handleConnection(client) }
@@ -111,6 +123,7 @@ class TransferServer(
         val input = runCatching { BufferedInputStream(client.getInputStream(), TransferProtocol.CHUNK_BYTES) }.getOrNull()
         if (output == null || input == null) {
             MeshLog.w(TAG, "Connection without usable streams")
+            connections.remove(client)
             client.closeQuietly()
             return
         }
@@ -118,6 +131,7 @@ class TransferServer(
         runCatching {
             val head = input.readRequestHead()
             if (head == null) {
+                connections.remove(client)
                 client.closeQuietly()
                 return
             }
@@ -132,7 +146,16 @@ class TransferServer(
                 }
 
                 head.method == "PUT" && head.path.startsWith(TransferProtocol.PATH_UPLOAD) -> {
+                    uploads[client] = head.segments().getOrNull(2).orEmpty()
                     handleUpload(head, input, output)
+                }
+
+                head.method == "GET" && head.path == TransferProtocol.PATH_READY -> {
+                    val id = head.query.substringAfter("batchId=", "").substringBefore('&')
+                    uploads[client] = id
+                    if (batches[id] != null && handler.awaitVerification(id)) {
+                        output.writeJson(200, "OK", "{}")
+                    } else output.writeError(403, "Forbidden", "Safety-code verification was not completed")
                 }
 
                 head.method == "GET" && head.path == TransferProtocol.PATH_STATUS -> {
@@ -149,6 +172,8 @@ class TransferServer(
             MeshLog.w(TAG, "Error while handling ${client.inetAddress}", error)
             runCatching { output.writeError(500, "Internal Server Error", error.message ?: "unknown") }
         }
+        uploads.remove(client)
+        connections.remove(client)
         client.closeQuietly()
     }
 
@@ -170,6 +195,33 @@ class TransferServer(
             return
         }
 
+        // Interrupted bytes expire instead of filling the private cache indefinitely.
+        val cutoff = System.currentTimeMillis() - 30 * 60_000L
+        batches.entries.filter { it.value.lastActivity < cutoff && it.value.writing.isEmpty() && it.key !in handshakes }
+            .forEach { forget(it.key) }
+        if (request.batchId !in batches && batches.size >= 64) {
+            val completed = batches.entries.filter { it.value.completed.size == it.value.request.files.size }
+                .minByOrNull { it.value.lastActivity }
+            if (completed != null) forget(completed.key) else {
+                output.writeError(503, "Service Unavailable", "Too many incomplete batches; cancel an old transfer")
+                return
+            }
+        }
+        if (!handshakes.add(request.batchId)) {
+            output.writeError(409, "Conflict", "A handshake for this batch is already pending")
+            return
+        }
+        try {
+        val previous = batches[request.batchId]
+        if (previous != null && (previous.request.senderId != request.senderId ||
+                previous.fingerprint != request.security?.fingerprint ||
+                previous.request.files.map { listOf(it.id, it.name, it.sizeBytes, it.mimeType) } !=
+                request.files.map { listOf(it.id, it.name, it.size, it.mime) } ||
+                previous.writing.isNotEmpty())) {
+            output.writeError(409, "Conflict", "Batch identity or manifest changed, or upload is active")
+            return
+        }
+        previous?.lastActivity = System.currentTimeMillis()
         val files = request.files.map { meta ->
             TransferFile(
                 id = meta.id,
@@ -198,13 +250,13 @@ class TransferServer(
 
         when (accepted) {
             true -> {
-                // Re-accepting the same batch (a retry) keeps what already landed; accepting
-                // a different set of files under an old id starts over.
-                val previous = batches[request.batchId]
-                val sameBatch = previous != null &&
-                    previous.request.files.map { it.id }.toSet() == files.map { it.id }.toSet()
-                batches[request.batchId] = if (sameBatch) previous!! else BatchState(incoming)
-                output.writeJson(200, "OK", acceptedJson(handler.localMaterialFor(request.batchId)?.toDto()))
+                if (!isRunning) return
+                batches[request.batchId] = previous ?: BatchState(incoming, request.security?.fingerprint)
+                output.writeJson(200, "OK", with(ControlMessages) {
+                    HandshakeResponse(HandshakeResponse.Decision.ACCEPTED,
+                        security = handler.localMaterialFor(request.batchId)?.toDto(),
+                        requiresVerification = handler.verificationRequired).toJson()
+                })
             }
 
             false -> {
@@ -215,9 +267,12 @@ class TransferServer(
                 output.writeJson(408, "Request Timeout", timeoutJson())
             }
         }
+        } finally {
+            handshakes.remove(request.batchId)
+        }
     }
 
-    private fun handleUpload(
+    private suspend fun handleUpload(
         head: Http.RequestHead,
         input: BufferedInputStream,
         output: BufferedOutputStream,
@@ -234,91 +289,94 @@ class TransferServer(
             output.writeError(409, "Conflict", "Unknown or expired batch")
             return
         }
+        if (!handler.awaitVerification(batchId)) {
+            output.writeError(403, "Forbidden", "Safety-code verification is required")
+            return
+        }
         val file = batch.request.files.firstOrNull { it.id == fileId }
         if (file == null) {
             output.writeError(404, "Not Found", "No such file in this batch")
             return
         }
 
-        // The name comes from the peer; the store cleans it and numbers duplicates.
-        val sink = fileStore.createSink(file.name, file.mimeType)
-        // Hash what actually reaches the disk, so a file can be compared against the
-        // sender's own digest once the batch is over - GCM tags prove each chunk survived,
-        // this proves the whole file is the one that was picked.
-        val digest = MessageDigest.getInstance(StreamingDigest.ALGORITHM)
-        val hashingStream = DigestOutputStream(sink.outputStream, digest)
-        if (sink.displayName != file.name) {
-            MeshLog.i(TAG, "Saving \"${file.name}\" as \"${sink.displayName}\"")
-        }
-        val startedAt = System.currentTimeMillis()
-        handler.onFileStarted(batchId, fileId)
-
-        val decryptionKey = handler.sessionKeyFor(batchId)
-        val expectedCiphertext = if (decryptionKey != null) {
-            SecureFrames.ciphertextLength(file.sizeBytes)
-        } else {
-            file.sizeBytes
-        }
-        if (expectedCiphertext > 0L && head.contentLength != expectedCiphertext) {
-            sink.abort()
-            val reason = "Size mismatch: got ${head.contentLength}, expected $expectedCiphertext"
-            handler.onFileFailed(batchId, fileId, reason)
-            output.writeError(400, "Bad Request", reason)
+        if (!batch.writing.add(fileId)) {
+            output.writeError(409, "Conflict", "This file is already being uploaded")
             return
         }
-
-        val bytes = runCatching {
-            if (decryptionKey != null) {
-                SecureFrames.decryptStream(
-                    key = decryptionKey,
-                    source = input,
-                    ciphertextLength = head.contentLength,
-                    sink = hashingStream,
-                ) { copied -> handler.onFileProgress(batchId, fileId, copied, file.sizeBytes) }
-            } else {
-                input.copyToWithProgress(hashingStream, head.contentLength) { copied ->
-                    handler.onFileProgress(batchId, fileId, copied, file.sizeBytes)
+        try {
+            if (batch.cancelled) throw java.io.InterruptedIOException("Cancelled")
+            if (fileId in batch.completed) {
+                output.writeError(409, "Conflict", "File already completed; query batch status")
+                return
+            }
+            val offset = head.rangeStart ?: 0L
+            if (head.header(TransferProtocol.HEADER_RANGE) != null && head.rangeStart == null) {
+                output.writeError(416, "Range Not Satisfiable", "Invalid resume range")
+                return
+            }
+            val size = head.header(TransferProtocol.HEADER_PLAIN_SIZE)?.toLongOrNull() ?: file.sizeBytes
+            val key = handler.sessionKeyFor(batchId)
+            val knownSize = size > 0 || head.header(TransferProtocol.HEADER_PLAIN_SIZE) != null
+            if (size < 0 || offset > size || (file.sizeBytes > 0 && size != file.sizeBytes) ||
+                !head.hasContentLength || head.contentLength < 0 ||
+                (knownSize && head.contentLength != (if (key != null) SecureFrames.ciphertextLength(size - offset) else size - offset))) {
+                output.writeError(400, "Bad Request", "Upload size does not match manifest")
+                return
+            }
+            val part = batch.partials.getOrPut(fileId) { fileStore.createPartial() }
+            val stream = runCatching { part.append(offset, head.header(TransferProtocol.HEADER_PREFIX_DIGEST)) }
+                .getOrElse {
+                    output.writeError(409, "Conflict", it.message ?: "Resume prefix changed")
+                    return
                 }
+            val startedAt = System.currentTimeMillis()
+            handler.onFileStarted(batchId, fileId)
+            try {
+                val bytes = stream.use { target ->
+                    fun progress(copied: Long) {
+                        batch.lastActivity = System.currentTimeMillis()
+                        if (batch.cancelled) throw java.io.InterruptedIOException("Cancelled")
+                        handler.onFileProgress(batchId, fileId, offset + copied, size)
+                    }
+                    if (key != null) {
+                        SecureFrames.decryptStream(key, input, head.contentLength, target, ::progress)
+                    } else {
+                        input.copyToWithProgress(target, head.contentLength, onProgress = ::progress)
+                    }
+                }
+                if (batch.cancelled) throw java.io.InterruptedIOException("Cancelled")
+                if (key == null && bytes != head.contentLength) throw java.io.EOFException("Truncated upload")
+                if (knownSize && part.size != size) throw java.io.EOFException("Truncated file")
+                val digest = part.digest()
+                // Publishing happens only after the entire payload is present and authenticated.
+                val sink = fileStore.createSink(file.name, file.mimeType)
+                val uri = try {
+                    part.file.inputStream().use { it.copyTo(sink.outputStream) }
+                    if (batch.cancelled) throw java.io.InterruptedIOException("Cancelled")
+                    sink.finish() ?: throw java.io.IOException("Could not publish received file")
+                } catch (error: Throwable) {
+                    sink.abort()
+                    throw error
+                }
+                batch.digests[fileId] = digest
+                synchronized(batch) { batch.bytesWritten += part.size }
+                batch.completed += fileId
+                batch.partials.remove(fileId)?.discard()
+                handler.onFileCompleted(batchId, fileId, uri.toString(), sink.displayName)
+                output.writeJson(200, "OK", uploadAckJson(UploadAck(
+                    fileId, bytes, System.currentTimeMillis() - startedAt, digest, offset,
+                )))
+            } catch (error: Exception) {
+                // Retain a disconnected transfer's prefix. Never retain corrupt or cancelled bytes.
+                if (batch.cancelled || error is javax.crypto.AEADBadTagException) {
+                    batch.partials.remove(fileId)?.discard()
+                }
+                handler.onFileFailed(batchId, fileId, error.message ?: "Receive failed")
+                output.writeError(500, "Internal Server Error", error.message ?: "Receive failed")
             }
-        }.getOrElse { error ->
-            sink.abort()
-            val reason = if (decryptionKey != null && error is javax.crypto.AEADBadTagException) {
-                "Integrity check failed: the bytes were modified in transit"
-            } else {
-                error.message ?: "write failed"
-            }
-            handler.onFileFailed(batchId, fileId, reason)
-            output.writeError(500, "Internal Server Error", reason)
-            return
+        } finally {
+            batch.writing.remove(fileId)
         }
-
-        val expectedSize = if (file.sizeBytes > 0L) file.sizeBytes else bytes
-        if (file.sizeBytes > 0L && bytes != file.sizeBytes) {
-            sink.abort()
-            handler.onFileFailed(batchId, fileId, "Truncated: got $bytes of ${file.sizeBytes} bytes")
-            output.writeError(400, "Bad Request", "Size mismatch")
-            return
-        }
-
-        val landedDigest = digest.digest().toHex()
-        batch.digests[fileId] = landedDigest
-        batch.bytesWritten += expectedSize
-
-        val uri = sink.finish()
-        batch.completed += fileId
-        handler.onFileCompleted(batchId, fileId, uri?.toString(), sink.displayName)
-        output.writeJson(
-            200,
-            "OK",
-            uploadAckJson(
-                UploadAck(
-                    fileId = fileId,
-                    bytes = expectedSize,
-                    durationMillis = System.currentTimeMillis() - startedAt,
-                    digest = landedDigest,
-                ),
-            ),
-        )
     }
 
     /**
@@ -341,14 +399,22 @@ class TransferServer(
             ""
         }
         val report = ControlMessages.parseCompleteRequest(body, batchId)
-        val batch = batches.remove(batchId)
+        val batch = batches[batchId]
+        if (batch == null) {
+            output.writeError(404, "Not Found", "Unknown batch")
+            return
+        }
+        if (batch.writing.isNotEmpty() || batch.completed.size != batch.request.files.size) {
+            output.writeError(409, "Conflict", "Batch is incomplete; retry missing files")
+            return
+        }
         val received = batch?.completed?.size ?: 0
 
         val mismatched = report?.files
             ?.filter { file -> file.digest != null }
             ?.filterNot { file ->
                 val landed = batch?.digests?.get(file.fileId)
-                landed == null || landed.equals(file.digest, ignoreCase = true)
+                landed != null && landed.equals(file.digest, ignoreCase = true)
             }
             ?.map { it.fileId }
             ?: emptyList()
@@ -383,13 +449,21 @@ class TransferServer(
             batchId = batchId,
             completedFileIds = batch.completed.toList(),
             bytesReceived = batch.bytesWritten,
+            partialFiles = batch.partials.entries.filter { it.key !in batch.writing }.associate { (id, part) ->
+                id to PartialStatus(part.size, part.digest())
+            },
         )
         output.writeJson(200, "OK", with(ControlMessages) { status.toJson() })
     }
 
     /** Drops a batch (used when the user cancels a download). */
     fun forget(batchId: String) {
-        batches.remove(batchId)
+        val batch = batches.remove(batchId)
+        if (batch != null) {
+            batch.cancelled = true
+            uploads.entries.filter { it.value == batchId }.forEach { it.key.closeQuietly() }
+            batch.partials.values.forEach { it.discard() }
+        }
     }
 
     // endregion
@@ -398,12 +472,16 @@ class TransferServer(
 
     private class BatchState(
         val request: IncomingRequest,
+        val fingerprint: String?,
         val completed: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         /** fileId → SHA-256 of what landed, for the end-of-batch comparison. */
         val digests: MutableMap<String, String> = ConcurrentHashMap(),
     ) {
-        @Volatile
-        var bytesWritten: Long = 0L
+        val partials = ConcurrentHashMap<String, PartialFile>()
+        val writing = ConcurrentHashMap.newKeySet<String>()
+        @Volatile var lastActivity = System.currentTimeMillis()
+        @Volatile var cancelled = false
+        @Volatile var bytesWritten: Long = 0L
     }
 
     companion object {

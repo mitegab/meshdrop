@@ -62,6 +62,8 @@ class AppContainer(val application: Application) {
         localDeviceId = userPreferences.deviceId,
         localDeviceName = { userPreferences.deviceName.value },
         encryptionEnabled = { userPreferences.encryptionEnabled.value },
+        requireVerification = { userPreferences.requireVerification.value },
+        autoAcceptVerified = { userPreferences.autoAcceptVerified.value },
         storageVolume = { storageVolume() },
         logSink = transferLogFile,
         alternativeRoutes = { deviceId: String -> meshController.alternativeRoutes(deviceId) },
@@ -88,8 +90,8 @@ class AppContainer(val application: Application) {
     val discoveryStrategies: List<DiscoveryStrategy> = listOf(
         NsdDiscoveryStrategy(application, applicationScope),
         UdpBeaconDiscoveryStrategy(applicationScope),
-        WifiDirectDiscoveryStrategy(),
-        BluetoothDiscoveryStrategy(),
+        WifiDirectDiscoveryStrategy(application, applicationScope),
+        BluetoothDiscoveryStrategy(application, applicationScope),
     )
 
     val discoveryCoordinator = DiscoveryCoordinator(discoveryStrategies, applicationScope)

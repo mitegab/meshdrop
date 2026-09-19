@@ -5,6 +5,8 @@ import com.meshdrop.core.model.PeerDevice
 import com.meshdrop.core.util.MeshLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -72,7 +74,7 @@ class DiscoveryCoordinator(
                 val cutoff = now() - peerTtl.inWholeMilliseconds
                 devices.filter { it.lastSeenMillis >= cutoff && it.host != null && it.port > 0 }
             }
-            .stateIn(scope, SharingStarted.WhileSubscribed(5_000), emptyList())
+            .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     val state: StateFlow<DiscoveryState> =
         combine(strategies.map { it.status }) { statuses: Array<StrategyStatus> ->
@@ -113,6 +115,18 @@ class DiscoveryCoordinator(
             runCatching {
                 if (strategy.isAvailable) strategy.startScan()
             }.onFailure { MeshLog.w(TAG, "${strategy.kind} scan failed", it) }
+        }
+    }
+
+    suspend fun connect(peer: PeerDevice): PeerDevice {
+        if (peer.isReachable()) return peer
+        val strategy = strategies.firstOrNull { it.kind == peer.kind }
+            ?: error("No transport can connect to this device")
+        val connected = strategy.connect(peer)
+        if (connected.isReachable()) return connected
+        return withTimeout(30_000) {
+            routes.first { list -> list.any { it.id == peer.id && it.isReachable() } }
+                .first { it.id == peer.id && it.isReachable() }
         }
     }
 

@@ -61,6 +61,7 @@ data class DropUiState(
     val queueLabel: String? = null,
     /** False once the user pauses discovery from the connection sheet. */
     val receiving: Boolean = true,
+    val connecting: Boolean = false,
 ) {
     val stagedBytes: Long get() = staged.sumOf { it.sizeBytes }
 
@@ -310,22 +311,23 @@ class DropViewModel(
 
     fun send() {
         val state = _ui.value
+        if (state.connecting) return
         val peer = state.peer
         val files = state.staged
         when {
             peer == null -> _ui.update { it.copy(message = "Pick a phone first") }
             files.isEmpty() -> _ui.update { it.copy(message = "Pick at least one file") }
             else -> viewModelScope.launch {
-                _ui.update { it.copy(message = null) }
+                _ui.update { it.copy(connecting = true, message = if (peer.isReachable()) null else "Connecting to ${peer.name}; approve the system prompt on the other device") }
                 runCatching { controller.send(peer, files) }
                     .onSuccess { jobId ->
                         // The tray is emptied the moment the bytes are the engine's problem:
                         // leaving the files staged invites a second copy of the same photo.
-                        _ui.update { it.copy(staged = emptyList(), activeJobId = jobId) }
+                        _ui.update { it.copy(staged = emptyList(), activeJobId = jobId, connecting = false) }
                     }
                     .onFailure { error ->
                         _ui.update {
-                            it.copy(message = error.message ?: "Could not start the transfer")
+                            it.copy(connecting = false, message = error.message ?: "Could not start the transfer")
                         }
                     }
             }

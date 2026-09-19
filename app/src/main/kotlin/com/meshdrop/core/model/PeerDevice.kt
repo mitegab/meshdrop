@@ -47,6 +47,8 @@ data class PeerDevice(
     val host: InetAddress? = null,
     val port: Int = 0,
     val lastSeenMillis: Long = System.currentTimeMillis(),
+    /** Discovery does not necessarily carry the bytes (e.g. BLE-assisted LAN discovery). */
+    val transferLane: TransportLane = kind.lane,
 ) {
     /** Address in the form `192.168.1.7:45821`, for display and logs. */
     val endpoint: String

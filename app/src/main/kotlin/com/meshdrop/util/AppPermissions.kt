@@ -21,6 +21,11 @@ object AppPermissions {
 
     /** Permissions the user has to grant at runtime (normal permissions are auto-granted). */
     fun runtimePermissions(): List<String> = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            add(Manifest.permission.BLUETOOTH_SCAN)
+            add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             add(Manifest.permission.NEARBY_WIFI_DEVICES)
             add(Manifest.permission.POST_NOTIFICATIONS)
@@ -58,6 +63,9 @@ object AppPermissions {
             "MeshDrop needs nearby-device access to find phones on this Wi-Fi network."
         Manifest.permission.ACCESS_FINE_LOCATION ->
             "On this Android version, local network discovery is part of the location permission group."
+        Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_ADVERTISE,
+        Manifest.permission.BLUETOOTH_CONNECT ->
+            "Optional: Bluetooth helps nearby phones find each other. Files still use the local network."
         Manifest.permission.POST_NOTIFICATIONS ->
             "Notifications let you accept a transfer, or follow its progress, from anywhere."
         Manifest.permission.WRITE_EXTERNAL_STORAGE ->
