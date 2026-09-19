@@ -34,6 +34,8 @@ class SettingsViewModel(
     private val controller: MeshController,
     private val verifiedPeers: com.meshdrop.transfer.crypto.VerifiedPeers,
     private val identityFingerprint: () -> String = { "" },
+    private val bluetoothTransport: com.meshdrop.transport.BluetoothTransport? = null,
+    private val usbTransport: com.meshdrop.transport.UsbTransport? = null,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -68,6 +70,15 @@ class SettingsViewModel(
 
     val localPort: Int get() = controller.localPort
     val strategyStatuses = controller.strategyStatuses
+
+    fun bluetoothDevices() = bluetoothTransport?.pairedDevices().orEmpty()
+    fun usbDevices() = usbTransport?.attached().orEmpty()
+    fun connectBluetooth(address: String) { viewModelScope.launch {
+        controller.start(); bluetoothTransport?.connect(address); showMessage("Connecting over RFCOMM…")
+    } }
+    fun connectUsb(id: String) { viewModelScope.launch {
+        controller.start(); usbTransport?.connect(id); showMessage("Approve USB access on the system prompt")
+    } }
 
     fun pairingCode(): String? {
         if (localPort <= 0 || identityFingerprint().isBlank()) return null

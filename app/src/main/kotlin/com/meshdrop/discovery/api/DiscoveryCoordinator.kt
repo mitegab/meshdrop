@@ -72,7 +72,7 @@ class DiscoveryCoordinator(
         }
             .combine(sweep) { devices, _ ->
                 val cutoff = now() - peerTtl.inWholeMilliseconds
-                devices.filter { it.lastSeenMillis >= cutoff && it.host != null && it.port > 0 }
+                devices.filter { it.lastSeenMillis >= cutoff && it.isReachable() }
             }
             .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
@@ -159,7 +159,7 @@ class DiscoveryCoordinator(
     }
 
     private fun PeerDevice.score(): Int =
-        (if (host != null) 100 else 0) + (if (port > 0) 10 else 0) +
+        (if (isReachable()) 100 else 0) + (if (port > 0) 10 else 0) +
             (lastSeenMillis / 1_000L).toInt().coerceAtMost(5)
 
     companion object {

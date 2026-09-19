@@ -1,6 +1,6 @@
 package com.meshdrop.transfer.protocol
 
-import android.util.Base64
+import java.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -441,7 +441,7 @@ object ControlMessages {
         )
     }.getOrNull()
 
-    private fun ByteArray.base64(): String = Base64.encodeToString(this, Base64.NO_WRAP)
+    private fun ByteArray.base64(): String = Base64.getEncoder().encodeToString(this)
 
-    private fun String.decodeBase64(): ByteArray = Base64.decode(this, Base64.DEFAULT)
+    private fun String.decodeBase64(): ByteArray = Base64.getDecoder().decode(this)
 }

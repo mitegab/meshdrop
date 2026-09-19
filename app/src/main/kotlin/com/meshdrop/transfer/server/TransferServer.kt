@@ -31,6 +31,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.net.ServerSocket
+import com.meshdrop.transfer.link.DuplexConnection
+import com.meshdrop.transfer.link.TcpConnection
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 
@@ -60,8 +62,8 @@ class TransferServer(
 
     /** batchId → state of that batch (accepted? which files landed?). */
     private val batches = ConcurrentHashMap<String, BatchState>()
-    private val connections = ConcurrentHashMap.newKeySet<Socket>()
-    private val uploads = ConcurrentHashMap<Socket, String>()
+    private val connections = ConcurrentHashMap.newKeySet<DuplexConnection>()
+    private val uploads = ConcurrentHashMap<DuplexConnection, String>()
     private val handshakes = ConcurrentHashMap.newKeySet<String>()
 
     @Volatile
@@ -96,7 +98,7 @@ class TransferServer(
 
     private suspend fun acceptLoop(socket: ServerSocket) = coroutineScope {
         while (isActive && !socket.isClosed) {
-            val client = runCatching { socket.accept() }.getOrElse { error ->
+            val client = runCatching { TcpConnection(socket.accept()) }.getOrElse { error ->
                 if (!socket.isClosed) MeshLog.w(TAG, "accept() failed", error)
                 return@coroutineScope
             }
@@ -106,12 +108,18 @@ class TransferServer(
             }
             connections += client
             client.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
-            client.tcpNoDelay = true
+            client.socket.tcpNoDelay = true
             launch(Dispatchers.IO) { handleConnection(client) }
         }
     }
 
-    private suspend fun handleConnection(client: Socket) {
+    suspend fun serve(connection: DuplexConnection) {
+        if (!isRunning || connections.size >= 32) { connection.close(); return }
+        connections += connection
+        handleConnection(connection)
+    }
+
+    private suspend fun handleConnection(client: DuplexConnection) {
         val output = runCatching { BufferedOutputStream(client.getOutputStream()) }.getOrNull()
         val input = runCatching { BufferedInputStream(client.getInputStream(), TransferProtocol.CHUNK_BYTES) }.getOrNull()
         if (output == null || input == null) {
@@ -162,7 +170,7 @@ class TransferServer(
                 else -> output.writeError(404, "Not Found", "Unknown endpoint ${head.path}")
             }
         }.onFailure { error ->
-            MeshLog.w(TAG, "Error while handling ${client.inetAddress}", error)
+            MeshLog.w(TAG, "Error while handling ${client.remoteAddress}", error)
             runCatching { output.writeError(500, "Internal Server Error", error.message ?: "unknown") }
         }
         uploads.remove(client)
@@ -483,7 +491,7 @@ class TransferServer(
 
     // endregion
 
-    private fun Socket.closeQuietly() = runCatching { close() }
+    private fun DuplexConnection.closeQuietly() = runCatching { close() }
 
     private class BatchState(
         val request: IncomingRequest,

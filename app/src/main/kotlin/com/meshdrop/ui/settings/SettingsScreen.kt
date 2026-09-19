@@ -71,6 +71,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val colors = MeshTheme.colors
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -188,6 +189,28 @@ fun SettingsScreen(
                     checked = uiState.vaultLock,
                     onCheckedChange = viewModel::setVaultLock,
                 )
+                Hairline()
+            }
+
+            item(key = "physical-links") {
+                Spacer(Modifier.height(Space.lg))
+                Eyebrow(text = "Without Wi-Fi")
+                Text("Bluetooth and USB carry encrypted files directly, not through tethering.", style = MaterialTheme.typography.bodyMedium)
+                TextAction(text = "Pair a Bluetooth device", onClick = {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS))
+                })
+                TextAction(text = "Make this phone discoverable", onClick = {
+                    runCatching { context.startActivity(android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                        .putExtra(android.bluetooth.BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120)) }
+                        .onFailure { viewModel.showMessage("Grant Bluetooth access first") }
+                })
+                viewModel.bluetoothDevices().forEach { (id, label) ->
+                    TextAction(text = "Connect Bluetooth: $label", onClick = { viewModel.connectBluetooth(id) })
+                }
+                viewModel.usbDevices().forEach { (id, label) ->
+                    TextAction(text = "Connect USB: $label", onClick = { viewModel.connectUsb(id) })
+                }
+                TextAction(text = "Refresh attached devices", onClick = { viewModel.showMessage("Attached devices refreshed") })
                 Hairline()
             }
 
@@ -311,15 +334,15 @@ fun SettingsScreen(
                         lane = TransportLane.BLUETOOTH,
                         title = "Bluetooth",
                         subtitle = transports[DiscoveryKind.BLUETOOTH]?.let {
-                            it.error ?: if (it.isActive) "BLE discovery · files travel over the local network" else it.note ?: "Inactive"
+                            it.error ?: if (it.isActive) "RFCOMM payloads and BLE discovery" else it.note ?: "Inactive"
                         } ?: "Not supported on this device",
                         active = transports[DiscoveryKind.BLUETOOTH]?.isActive == true,
                     )
                     TransportRow(
                         lane = TransportLane.USB,
                         title = "USB-C cable",
-                        subtitle = "Enable USB tethering in Android settings to use an IP cable link. Raw USB accessories are not supported.",
-                        active = false,
+                        subtitle = transports[DiscoveryKind.USB]?.note ?: "Connect an AOA host/accessory above",
+                        active = transports[DiscoveryKind.USB]?.isActive == true,
                     )
                     Spacer(modifier = Modifier.height(Space.sm))
                 }

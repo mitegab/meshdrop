@@ -13,6 +13,7 @@ enum class DiscoveryKind(val label: String) {
     LAN_BEACON("Wi-Fi"),
     WIFI_DIRECT("Wi-Fi Direct"),
     BLUETOOTH("Bluetooth"),
+    USB("USB accessory"),
 }
 
 /**
@@ -27,6 +28,7 @@ val DiscoveryKind.lane: TransportLane
         DiscoveryKind.LAN_NSD, DiscoveryKind.LAN_BEACON -> TransportLane.WIFI_LAN
         DiscoveryKind.WIFI_DIRECT -> TransportLane.WIFI_DIRECT
         DiscoveryKind.BLUETOOTH -> TransportLane.BLUETOOTH
+        DiscoveryKind.USB -> TransportLane.USB
     }
 
 /**
@@ -48,12 +50,13 @@ data class PeerDevice(
     val lastSeenMillis: Long = System.currentTimeMillis(),
     /** Discovery does not necessarily carry the bytes (e.g. BLE-assisted LAN discovery). */
     val transferLane: TransportLane = kind.lane,
+    val linkId: String? = null,
 ) {
     /** Address in the form `192.168.1.7:45821`, for display and logs. */
     val endpoint: String
-        get() = host?.hostAddress?.let { address ->
+        get() = linkId ?: host?.hostAddress?.let { address ->
             if (port > 0) "$address:$port" else address
         } ?: "resolving…"
 
-    fun isReachable(): Boolean = host != null && port > 0
+    fun isReachable(): Boolean = linkId != null || (host != null && port > 0)
 }

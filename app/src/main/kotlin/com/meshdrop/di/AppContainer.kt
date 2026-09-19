@@ -40,7 +40,7 @@ class AppContainer(val application: Application) {
     val receivedFileStore = ReceivedFileStore(application)
 
     /** Long-term device identity used to authenticate peers (Android Keystore). */
-    val deviceIdentity: DeviceIdentity = DeviceIdentity.create(application)
+    val deviceIdentity: DeviceIdentity = com.meshdrop.transfer.crypto.AndroidDeviceIdentity.create(application)
     val verifiedPeers = VerifiedPeers(application)
 
     /** Private storage for files the user moved out of shared storage. */
@@ -52,6 +52,10 @@ class AppContainer(val application: Application) {
     // Explicit types on both the engine and the controller: the engine asks the controller
     // for fallback routes and the controller holds the engine, and letting Kotlin infer the
     // pair makes it try to resolve the cycle at compile time.
+    val linkRegistry: com.meshdrop.transfer.link.LinkRegistry = com.meshdrop.transfer.link.LinkRegistry(applicationScope) { transferEngine.acceptLink(it) }
+    val bluetoothTransport = com.meshdrop.transport.BluetoothTransport(application, applicationScope, linkRegistry)
+    val usbTransport = com.meshdrop.transport.UsbTransport(application, applicationScope, linkRegistry)
+
     val transferEngine: TransferEngine = TransferEngine(
         scope = applicationScope,
         documentRepository = documentRepository,
@@ -66,6 +70,7 @@ class AppContainer(val application: Application) {
         autoAcceptVerified = { userPreferences.autoAcceptVerified.value },
         storageVolume = { storageVolume() },
         logSink = transferLogFile,
+        connectionFactory = linkRegistry,
         alternativeRoutes = { deviceId: String -> meshController.alternativeRoutes(deviceId) },
     )
 
@@ -92,6 +97,8 @@ class AppContainer(val application: Application) {
         UdpBeaconDiscoveryStrategy(applicationScope),
         WifiDirectDiscoveryStrategy(application, applicationScope),
         BluetoothDiscoveryStrategy(application, applicationScope),
+        linkRegistry.strategy(com.meshdrop.core.model.DiscoveryKind.BLUETOOTH),
+        linkRegistry.strategy(com.meshdrop.core.model.DiscoveryKind.USB),
     )
 
     val discoveryCoordinator = DiscoveryCoordinator(discoveryStrategies, applicationScope)
@@ -101,5 +108,7 @@ class AppContainer(val application: Application) {
         discovery = discoveryCoordinator,
         engine = transferEngine,
         scope = applicationScope,
+        startLinks = { bluetoothTransport.start(); usbTransport.start() },
+        stopLinks = { bluetoothTransport.stop(); usbTransport.stop(); linkRegistry.close() },
     )
 }

@@ -70,5 +70,6 @@ enum class EndpointRole { SENDER, RECEIVER }
 fun DiscoveryKind.toLane(): TransportLane = when (this) {
     DiscoveryKind.WIFI_DIRECT -> TransportLane.WIFI_DIRECT
     DiscoveryKind.BLUETOOTH -> TransportLane.BLUETOOTH
+    DiscoveryKind.USB -> TransportLane.USB
     DiscoveryKind.LAN_NSD, DiscoveryKind.LAN_BEACON -> TransportLane.WIFI_LAN
 }

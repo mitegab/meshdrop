@@ -1,6 +1,5 @@
 package com.meshdrop.transfer.client
 
-import android.net.Uri
 import com.meshdrop.core.resume.PartialFile
 import com.meshdrop.transfer.protocol.PartialStatus
 import com.meshdrop.transfer.protocol.HttpRanges
@@ -9,8 +8,6 @@ import com.meshdrop.core.integrity.toHex
 import com.meshdrop.core.model.PeerDevice
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.util.MeshLog
-import com.meshdrop.data.DocumentRepository
-import com.meshdrop.data.FileSpooler
 import com.meshdrop.transfer.crypto.SecureFrames
 import com.meshdrop.transfer.crypto.TransferCrypto
 import com.meshdrop.transfer.crypto.toDto
@@ -30,13 +27,9 @@ import com.meshdrop.transfer.protocol.TransferProtocol
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.BufferedInputStream
-import java.io.File
-import java.io.FileInputStream
 import java.io.InputStream
-import java.net.InetSocketAddress
 import java.security.DigestInputStream
 import java.security.MessageDigest
-import java.net.Socket
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
@@ -80,8 +73,8 @@ data class SendOutcome(
  * within one buffer.
  */
 class TransferClient(
-    private val documentRepository: DocumentRepository,
-    private val fileSpooler: FileSpooler,
+    private val payloadSource: PayloadSource,
+    private val connectionFactory: com.meshdrop.transfer.link.ConnectionFactory = com.meshdrop.transfer.link.ConnectionFactory.TCP,
 ) {
 
     /**
@@ -111,7 +104,7 @@ class TransferClient(
         cancellationChecks[batchId] = isCancelled
         try {
             val host = peer.host
-            if (host == null || peer.port <= 0) {
+            if (!peer.isReachable()) {
                 return SendOutcome(false, "That device has no reachable address yet", emptyList())
             }
 
@@ -260,7 +253,7 @@ class TransferClient(
         onFileProgress: (fileId: String, bytesSent: Long, sizeBytes: Long, bytesPerSecond: Long) -> Unit,
         partial: PartialStatus? = null,
     ): FileOutcome {
-        val opened = openPayload(file)
+        val opened = payloadSource.open(file)
             ?: return FileOutcome(file.id, false, 0L, "Cannot open ${file.name}")
         val (stream, sizeBytes) = opened
         val digest = MessageDigest.getInstance(StreamingDigest.ALGORITHM)
@@ -450,7 +443,7 @@ class TransferClient(
      * change until the read times out on its own. Closing the socket is what turns "wait two
      * minutes" into "fail over now".
      */
-    private val openSockets = ConcurrentHashMap<String, Socket>()
+    private val openSockets = ConcurrentHashMap<String, com.meshdrop.transfer.link.DuplexConnection>()
     private val cancellationChecks = ConcurrentHashMap<String, () -> Boolean>()
 
     /** Closes the connection a batch is using. The in-flight upload fails; the caller decides what that means. */
@@ -461,54 +454,16 @@ class TransferClient(
         }
     }
 
-    private fun connect(peer: PeerDevice, batchId: String? = null): Socket {
-        val socket = Socket()
-        // Register before connect: even a stalled TCP connection attempt can be cancelled.
-        if (batchId != null) openSockets.put(batchId, socket)?.let { runCatching { it.close() } }
-        try {
-            if (batchId != null && cancellationChecks[batchId]?.invoke() == true) {
-                throw java.io.InterruptedIOException("Cancelled")
+    private fun connect(peer: PeerDevice, batchId: String? = null): com.meshdrop.transfer.link.DuplexConnection =
+        connectionFactory.open(peer) { connection ->
+            if (batchId != null) {
+                openSockets.put(batchId, connection)?.let { runCatching { it.close() } }
+                if (cancellationChecks[batchId]?.invoke() == true) {
+                    connection.close()
+                    throw java.io.InterruptedIOException("Cancelled")
+                }
             }
-            socket.tcpNoDelay = true
-            socket.connect(InetSocketAddress(requireNotNull(peer.host), peer.port), TransferProtocol.CONNECT_TIMEOUT_MS)
-            socket.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
-            return socket
-        } catch (error: Throwable) {
-            runCatching { socket.close() }
-            if (batchId != null) openSockets.remove(batchId, socket)
-            throw error
         }
-    }
-
-    /**
-     * Opens the bytes to send. When the document provider did not report a size we spool the
-     * document to the cache first, because the protocol needs `Content-Length` up front.
-     */
-    private fun openPayload(file: TransferFile): Pair<InputStream, Long>? {
-        val uri = file.localUri?.let { Uri.parse(it) } ?: return null
-        if (file.sizeBytes > 0L) {
-            val stream = documentRepository.openInputStream(uri) ?: return null
-            return stream to file.sizeBytes
-        }
-        val original = documentRepository.openInputStream(uri) ?: return null
-        val spooled: File = fileSpooler.spool(uri, original, file.name) ?: return null
-        val stream = FileInputStream(spooled)
-        return RememberingStream(stream, spooled) to spooled.length()
-    }
-
-    /** Deletes the spooled copy once the upload is done. */
-    private inner class RememberingStream(
-        private val delegate: InputStream,
-        private val spooled: File,
-    ) : InputStream() {
-        override fun read(): Int = delegate.read()
-        override fun read(b: ByteArray, off: Int, len: Int): Int = delegate.read(b, off, len)
-        override fun available(): Int = delegate.available()
-        override fun close() {
-            runCatching { delegate.close() }
-            fileSpooler.delete(spooled)
-        }
-    }
 
     private fun readable(error: Throwable): String = when {
         error.message?.contains("ECONNREFUSED", ignoreCase = true) == true -> "The device is no longer reachable"

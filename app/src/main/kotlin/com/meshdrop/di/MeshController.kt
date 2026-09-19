@@ -30,6 +30,8 @@ class MeshController(
     private val discovery: DiscoveryCoordinator,
     private val engine: TransferEngine,
     scope: CoroutineScope,
+    private val startLinks: () -> Unit = {},
+    private val stopLinks: () -> Unit = {},
 ) {
 
     private val mutex = Mutex()
@@ -123,6 +125,7 @@ class MeshController(
      */
     suspend fun start() = mutex.withLock {
         val port = engine.startReceiving()
+        startLinks()
         if (port <= 0) {
             MeshLog.w(TAG, "Could not start the receiver; skipping discovery")
             return
@@ -139,6 +142,7 @@ class MeshController(
     suspend fun stop() = mutex.withLock {
         advertisedPort = 0
         discovery.stop()
+        stopLinks()
         engine.stopReceiving()
     }
 

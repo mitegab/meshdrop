@@ -37,6 +37,8 @@ class MeshDropViewModelFactory(
             controller = container.meshController,
             verifiedPeers = container.verifiedPeers,
             identityFingerprint = { container.deviceIdentity.fingerprint },
+            bluetoothTransport = container.bluetoothTransport,
+            usbTransport = container.usbTransport,
         ) as T
 
         else -> throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

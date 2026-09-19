@@ -100,10 +100,11 @@ class TransferEngine(
      * the discovery layer (and so tests can hand it a fixed list).
      */
     private val alternativeRoutes: (String) -> List<PeerDevice> = { emptyList() },
+    private val connectionFactory: com.meshdrop.transfer.link.ConnectionFactory = com.meshdrop.transfer.link.ConnectionFactory.TCP,
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : IncomingTransferHandler {
 
-    private val client = TransferClient(documentRepository, fileSpooler)
+    private val client = TransferClient(com.meshdrop.transfer.client.AndroidPayloadSource(documentRepository, fileSpooler), connectionFactory)
 
     /** A send waiting for a slot on the radio. */
     private class PendingSend(
@@ -208,6 +209,8 @@ class TransferEngine(
     }
 
     fun stopReceiving() = server.stop()
+
+    suspend fun acceptLink(connection: com.meshdrop.transfer.link.DuplexConnection) = server.serve(connection)
 
     // endregion
 
