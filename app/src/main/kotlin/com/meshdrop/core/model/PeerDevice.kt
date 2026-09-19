@@ -5,8 +5,8 @@ import java.net.InetAddress
 /**
  * How a peer was found.
  *
- * Wi-Fi Direct can form a group on selection. Bluetooth is discovery only; the payload
- * lane is recorded separately on [PeerDevice].
+ * Wi-Fi Direct can form a group on selection. BLE advertisements and native RFCOMM
+ * share a discovery category; the actual payload lane/link is recorded on [PeerDevice].
  */
 enum class DiscoveryKind(val label: String) {
     LAN_NSD("Wi-Fi"),

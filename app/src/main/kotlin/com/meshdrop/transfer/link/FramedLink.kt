@@ -20,6 +20,10 @@ class FramedLink(
     private val onIncoming: (DuplexConnection) -> Unit,
     private val onClosed: () -> Unit = {},
 ) : Closeable {
+    // Accessory/bulk drivers are packet-oriented underneath the stream API. Read ahead
+    // instead of issuing one-byte physical reads for headers (which can drop a USB packet).
+    private val bufferedInput = BufferedInputStream(input, FRAME_BYTES)
+    private val bufferedOutput = BufferedOutputStream(output, FRAME_BYTES)
     private val channels = ConcurrentHashMap<Int, Channel>()
     private var lastRemoteId = 0
     val isOpen: Boolean get() = !closed.get()
@@ -35,8 +39,8 @@ class FramedLink(
     init {
         thread(name = "meshdrop-link", isDaemon = true) {
             try {
-                synchronized(writerLock) { output.write(PREFACE); output.flush() }
-                val source = DataInputStream(input)
+                synchronized(writerLock) { bufferedOutput.write(PREFACE); bufferedOutput.flush() }
+                val source = DataInputStream(bufferedInput)
                 val greeting = ByteArray(PREFACE.size).also { source.readFully(it) }
                 require(greeting.contentEquals(PREFACE)) { "Unsupported link protocol" }
                 ready.countDown()
@@ -95,7 +99,7 @@ class FramedLink(
         if (closed.get()) throw IOException("Link disconnected")
         val deadline = WATCHDOG.schedule({ close() }, 30, TimeUnit.SECONDS)
         try {
-            val writer = DataOutputStream(output)
+            val writer = DataOutputStream(bufferedOutput)
             writer.writeByte(type); writer.writeInt(id); writer.writeInt(body.size); writer.write(body); writer.flush()
         } finally { deadline.cancel(false) }
     }

@@ -13,8 +13,11 @@ logic; they do not substitute for these radio and MediaStore checks.
 4. Cancel an encrypted receive during a blocked read and an encrypted send during the
    acceptance prompt. Both should stop immediately. No private partial survives receiver
    cancellation. Completed files remain available.
-5. Kill the receiver process during an upload. Restart must clean cache orphans, not claim
-   that the old in-memory session was resumed. Retry requires a new approval.
+5. Kill the receiver process during an encrypted upload. Restart must restore its original
+   manifest and validated prefix, but no acceptance or AES key. Retry asks for fresh approval
+   and uses fresh keys. Change private partial bytes and verify the sender rejects the prefix.
+   Repeat after killing the sender: its queue must show a manual Retry with retained SAF access.
+   Revoke that grant and confirm a visible failure, not a silently skipped file.
 6. Queue three batches, two addressed to the same peer. At most two sends run concurrently;
    the second send to a busy peer waits and starts after that peer's first batch finishes.
 
@@ -51,9 +54,48 @@ logic; they do not substitute for these radio and MediaStore checks.
    transfers should use the tethered subnet and be labelled USB on the sender.
 2. Connect both Wi-Fi and tethering; ensure subnet-based labels select the actual connected
    route rather than treating every endpoint as USB because a cable is attached.
-3. A raw USB accessory with no IP link must not be shown as a usable endpoint.
+3. An unconnected raw USB accessory must not be labelled as tethering; a successfully opened
+   AOA link appears separately and must work with all IP radios disabled.
 
 ## Storage and lifecycle
 Repeat receive/open/share/vault on MediaStore and legacy storage devices, with denied legacy
 write permission, low space and background restrictions. Verify atomic publication, visible
 failures, foreground notification behavior and persistent Activity after relaunch.
+
+## Native RFCOMM (no IP)
+1. Disable Wi-Fi/mobile data. Enable Bluetooth and pair through Android. Start receiving on
+   both phones; select the paired device in Settings. Confirm the linked peer resolves with
+   no IP/port and encrypted payloads travel over RFCOMM in both directions.
+2. Deny/regrant Bluetooth permission, toggle the radio, disconnect during a large file and
+   reconnect/Retry. Compare hashes, check cancellation and test simultaneous sends.
+3. Fill the multiplexed stream window with a slow receiver. Identity probing must not tear
+   down a healthy busy link. Pause receiving and verify listener/link descriptors close.
+
+## Raw USB AOA (not tethering)
+1. Use a data-capable cable and compatible USB host/OTG roles. Select the attached Android
+   device on the host; approve USB permission. It switches to AOA and re-enumerates.
+2. Refresh Settings and select the new AOA device. On the accessory side approve opening
+   MeshDrop. No tethering/network setup should be needed; disable radios and verify transfer.
+3. Test both host/accessory directions, reconnect after detach, change USB role, deny access,
+   and test a charge-only cable/unsupported device. Failure must be visible and bounded.
+4. Verify control and payload progress while another channel stalls; no leaked descriptors
+   or busy-loop CPU after detach. Record VID/PID, Android versions, cable and role configuration.
+
+## Swarm and multi-hop
+1. Pair sender/final recipient with full fingerprints. Helpers enable helper mode. A helper
+   still prompts for each route; declining or turning off/revoking helper mode blocks use.
+2. Use two helpers for a multi-chunk file plus an empty file. Confirm both contribute actual
+   bytes, only the final destination publishes files, and all whole-file hashes match.
+3. Use two/three ordered helpers, with the final destination unreachable directly from the
+   source. Configure each next-hop directory (CLI can supply IDs/addresses explicitly).
+4. Remove one independent helper after approval. Missing assignments should use another
+   approved route; successful completion must have destination-signed receipts.
+5. Kill sender and destination between chunks. Recovery must preserve immutable manifests,
+   verify private chunks and re-approve/rekey. Helpers always need new grants after their restart.
+6. Expire a grant, exhaust a quota, replay an assignment, alter a signed route or ciphertext,
+   and substitute the destination identity. None may produce a false successful receipt.
+
+## Desktop
+Run `scripts/cli_smoke.py` after `:cli:installDist`, then test Android ↔ desktop in both
+roles, pairing, cancellation, retry after Android force-stop, unknown-size documents and
+non-ASCII/duplicate filenames. Linux CI does not replace Windows/macOS manual validation.

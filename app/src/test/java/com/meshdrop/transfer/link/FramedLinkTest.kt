@@ -8,14 +8,21 @@ import java.net.Socket
 import java.util.concurrent.*
 
 class FramedLinkTest {
-    private class Pair : Closeable {
+    private class Pair(private val requireBulkReads: Boolean = false) : Closeable {
         private val listener = ServerSocket(0)
         private val left = Socket("127.0.0.1", listener.localPort)
         private val right = listener.accept().also { listener.close() }
         val incomingLeft = LinkedBlockingQueue<DuplexConnection>()
         val incomingRight = LinkedBlockingQueue<DuplexConnection>()
-        val a = FramedLink(left.getInputStream(), left.getOutputStream(), left, true, { incomingLeft.add(it) })
-        val b = FramedLink(right.getInputStream(), right.getOutputStream(), right, false, { incomingRight.add(it) })
+        private fun input(socket: Socket): InputStream = if (!requireBulkReads) socket.getInputStream() else object : FilterInputStream(socket.getInputStream()) {
+            override fun read(): Int = error("One-byte USB reads can truncate packets")
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                check(len >= 16 * 1024) { "Physical read smaller than a USB packet buffer" }
+                return super.read(b, off, len)
+            }
+        }
+        val a = FramedLink(input(left), left.getOutputStream(), left, true, { incomingLeft.add(it) })
+        val b = FramedLink(input(right), right.getOutputStream(), right, false, { incomingRight.add(it) })
         override fun close() { a.close(); b.close() }
     }
 
@@ -51,8 +58,8 @@ class FramedLinkTest {
         }
     }
 
-    @Test(timeout = 10000) fun `large transfers replenish credits and retain bytes before close`() {
-        Pair().use { pair ->
+    @Test(timeout = 10000) fun `large transfers replenish credits without tiny physical USB reads`() {
+        Pair(requireBulkReads = true).use { pair ->
             val channel = pair.a.open(); val remote = pair.incomingRight.poll(2, TimeUnit.SECONDS)!!
             val expected = ByteArray(1_000_013) { (it % 251).toByte() }
             val worker = Executors.newSingleThreadExecutor()

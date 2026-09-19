@@ -36,20 +36,50 @@ history, queueing, whole-file SHA-256, batch retry and lane monitoring already e
 - [x] Expose pairing-code export/import with explicit fingerprint confirmation in Settings.
 - [x] Reject malformed manifests, duplicate file IDs, negative sizes and size-sum overflow.
 
-## Still not implemented
+## Iteration 5 — native no-IP byte transports
 
-These are NOT checked off by the discovery adapters, a UI label or the existing domain models:
+- [x] Shared duplex-connection seam, bounded stream multiplexing and no-IP identity ping.
+- [x] Secure RFCOMM listener/client, explicit paired-device selection and connect timeout.
+- [x] Android AOA host negotiation (requests 51/52/53), accessory descriptors, bulk streams,
+  explicit permission/selection and detach cleanup. Not USB tethering.
+- [x] Settings controls and unified discovery/status/transport routing.
+- [x] Socket-backed framing tests: bidirectional channels, large streams, credits,
+  cancellation, stream caps and malicious credit violations.
+- [ ] Physical radios/cables/OEM validation.
 
-- [ ] Multi-source swarm data transfer and reassembly: requires authenticated chunk manifests,
-  assignment/receipt messages and a final destination distinct from helper peers.
-- [ ] Multi-hop relay: requires explicit relay consent, routing/loop limits, resource quotas
-  and end-to-end authentication through a helper. An unrestricted TCP proxy is not a safe substitute.
-- [ ] Raw USB accessory/host protocol. USB tethering is an OS-managed IP link, not accessory mode.
-- [ ] Bluetooth RFCOMM payload/control transport and no-IP bootstrap. Current BLE discovery needs
-  a shared reachable IP network; offline connection setup is Wi-Fi Direct.
-- [ ] Cross-process transfer resume/queue recovery: requires durable manifests and content-URI
-  grants, partial-file journal validation and approval/session recovery. Current resume is session-scoped.
-- [ ] Desktop/CLI client. The protocol is portable, but this repository still ships an Android app.
+## Iteration 6 — durable recovery
+
+- [x] Checksummed, fsync'd atomic journals, hashed batch paths and safe partial-file reopening.
+- [x] Actual signing-key ownership binds encrypted receiver journals, not claimed fingerprints.
+- [x] Durable manifests/receipt metadata; rehash actual prefixes/chunks on recovery.
+- [x] SAF read-grant retention and outgoing queue restoration as review/Retry, not silent sending.
+- [x] New approval and fresh session keys; no persisted AES keys or accepted decisions.
+- [x] Lazy retention/caps, corrupt-journal rejection, explicit cancellation cleanup.
+- [x] CLI subprocess test cuts a real encrypted upload and kills/restarts the receiver.
+- [ ] Exactly-once publication across the OS-publish/journal-write crash window is not promised.
+
+## Iteration 7 — actual helper data delivery
+
+- [x] Canonically signed immutable manifests bind sender, full destination identity, expiry,
+  file hashes, chunk hashes and bounds.
+- [x] AES-GCM AAD binds manifest/file/index; destination-signed chunk and completion receipts.
+- [x] Helpers stage encrypted assignments and forward them as independent data sources;
+  the distinct final recipient verifies/reassembles. Failed assignments can move to another path.
+- [x] Explicit helper-mode switch plus per-route consent, expiry/revocation, fixed known
+  next-hop IDs, signature/replay/loop checks, request+response byte budgets and cache/worker caps.
+- [x] Ordered multi-hop grant setup and allowlisted MeshDrop RPCs; no arbitrary TCP proxy.
+- [x] Android route/helper controls, approval cards, actual helper progress and queue integration.
+- [x] Real-socket tests for two helper sources, two hops, restored chunks, tampering,
+  stolen grants, arbitrary endpoint rejection, replay, revocation and quotas.
+
+## Iteration 8 — shared JVM desktop CLI
+
+- [x] `:cli` compiles shared protocol/client/server/crypto/storage code (not a protocol reimplementation).
+- [x] Persistent P-256 identity/trust, safe filesystem sinks, identity/pairing export, send/receive,
+  manual peer directories, swarm/multi-hop helpers, durable queue/retry and serial-stream adapter.
+- [x] Helper consent is always interactive; `--accept-verified` applies only to incoming files.
+- [x] JDK 17 distribution and Android APK uploaded by CI; desktop storage tests and smoke script.
+- [ ] Windows/macOS runtime and native desktop USB/Bluetooth SDK integration need separate validation.
 
 ## Validation record
 
@@ -71,3 +101,18 @@ These are NOT checked off by the discovery adapters, a UI label or the existing 
 
 Automated success is not a claim that Wi-Fi P2P, BLE, USB tethering or Android MediaStore have
 been exercised on physical hardware in this environment.
+
+### New transport/mesh/CLI iterations
+
+- `b1f92f4`: [CI 35464770484](https://github.com/mitegab/meshdrop/actions/runs/35464770484)
+  passed the Android build and existing JVM tests after native transport extraction.
+- `06e3cc2`: the first combined build found a missing shared `Format` dependency in `:cli`.
+  The source-set boundary was corrected rather than duplicating protocol code.
+- `55efc35`: [CI 35465726560](https://github.com/mitegab/meshdrop/actions/runs/35465726560)
+  passed Android APK + CLI distribution builds, Android JVM tests, CLI smoke commands and
+  both artifact uploads. This includes real-socket swarm/two-hop tests and framing/recovery tests.
+- Subsequent iterations add actual subprocess kill/retry, desktop storage tests, stronger
+  cancellation/expiry checks, and verification-gated recovery assembly. Their final CI
+  result is recorded below once complete.
+
+These checks run on Linux JVMs. They do not certify USB AOA or Bluetooth hardware behavior.

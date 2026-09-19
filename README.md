@@ -1,8 +1,9 @@
 # MeshDrop — a cross-platform peer-to-peer file-sharing system that discovers nearby devices and transfers files directly without requiring internet, cloud storage, or a central server.
 
-MeshDrop is an Android MVP of a SHAREit-style file drop: two phones on the same Wi-Fi
-network find each other, one picks files, the other accepts, and the bytes move
-device-to-device over a plain TCP socket. **No accounts, no cloud, no server.**
+MeshDrop is an Android app and a JVM desktop CLI for local, device-to-device file transfer.
+It supports LAN/Wi-Fi Direct, native Bluetooth RFCOMM and raw USB AOA byte streams, plus
+consented encrypted helper delivery. **No accounts, no cloud, no central server.**
+Radio/USB implementations still require physical-device validation; see the test matrix below.
 
 ```
 ┌───────────────────────────── same Wi-Fi network ─────────────────────────────┐
@@ -34,12 +35,15 @@ device-to-device over a plain TCP socket. **No accounts, no cloud, no server.**
 | Peer verification | ✅ six digit safety code (SAS) + remembered identity fingerprints |
 | Vault for received files | ✅ app-private storage, gated by the device lock |
 | Live transfer telemetry | ✅ smoothed speed/ETA, steadiness, Canvas throughput graph — one tap away in *Details* |
-| Runs without internet/cloud/accounts | ✅ LAN only; identity is a random local device id |
+| Runs without internet/cloud/accounts | Local IP or native byte streams; identity keys stay on the device |
 | Wi-Fi Direct | Implemented: DNS-SD service discovery, explicit group connection, endpoint identity probe; physical-device validation pending |
-| Bluetooth-assisted discovery | Implemented: compact BLE endpoint advertisements + TCP identity probe; **payloads still use IP**, not Bluetooth |
-| USB tethering | Uses existing IP transfer/discovery; USB interface routes are labelled separately. Raw USB accessory mode is not implemented |
-| Resume interrupted files | Private staging + SHA-256 prefix verification + fresh encryption session on retry, within the receiver process lifetime |
-| Persistent activity and queued sends | App-private transfer log, bounded concurrent sends, one batch per peer |
+| Bluetooth | BLE-assisted IP discovery **and** separate secure RFCOMM control/payload transport with no-IP identity bootstrap |
+| USB | Raw Android Open Accessory host/accessory streams; USB tethering remains a separate IP option |
+| Resume interrupted files | Durable encrypted-batch manifests, rehashed private prefixes/chunks and fresh keys/approval after restart |
+| Persistent activity and queued sends | Private history and durable outgoing queue; recovered sends wait for explicit Retry |
+| Swarm | Signed 1 MiB chunk assignments, independent helper sources, destination reassembly and signed receipts |
+| Multi-hop relay | Explicit per-route consent, fixed next peer, at most 3 helpers, replay/loop checks and byte/cache/concurrency limits |
+| Desktop/CLI | JDK 17 client/receiver/helper sharing the Android protocol and crypto; Linux serial/RFCOMM endpoint adapter |
 | Trust controls and pairing codes | Verification gate, authenticated trusted-device auto-accept, explicit pairing-code import/export |
 
 ## Screens
@@ -136,13 +140,15 @@ for completed files and verified resume prefixes, and `GET /meshdrop/ready?batch
 for an optional receiver verification gate. The gate is advertised in the acceptance
 response so new senders wait before uploading. Older senders are still gated at the receiver.
 
-Interrupted payloads are staged in app-private cache, never published to Downloads. A retry
+Interrupted payloads are staged in app-private durable storage, never published to Downloads. A retry
 keeps the original manifest, negotiates fresh keys, skips complete files and sends only the
 suffix whose prefix checksum matches both devices. `Range: bytes=<offset>-` is accompanied
 by `X-MeshDrop-Prefix-SHA256`; invalid offsets or prefixes are rejected. Incomplete batches
 are not finalized. Receiver cancellation closes sockets and deletes partials; completed
-receipts are retained for idempotent completion retries. Idle partial batches expire after
-30 minutes when a new handshake arrives; admission limits bound retained state and open connections.
+receipts are retained for idempotent completion retries. Encrypted, signature-validated batches
+have checksummed atomic journals; restoring never restores acceptance or session keys.
+Idle receiver journals expire lazily after 24 hours and are limited to 64; admission limits
+also bound open connections. Unauthenticated/plaintext resume remains process-local.
 
 Errors are JSON (`{"error": "…"}`) with real
 status codes (`403` rejected, `408` no answer, `426` protocol too new).
@@ -259,7 +265,9 @@ decisions) lives in the **application scope**; screens are thin and only render 
 
 ```bash
 ./gradlew assembleDebug          # debug APK in app/build/outputs/apk/debug/
-./gradlew testDebugUnitTest      # JVM unit tests
+./gradlew testDebugUnitTest :cli:test  # Android-core and desktop JVM tests
+./gradlew :cli:installDist       # cli/build/install/meshdrop/{bin,lib}
+python3 scripts/cli_smoke.py     # real subprocess encrypted transfer + killed-receiver recovery
 ```
 
 Requirements: JDK 17 and the Android SDK (AGP downloads the platform/build-tools for you).
@@ -296,30 +304,55 @@ Implement `DiscoveryStrategy`, register it in `AppContainer`, and override `conn
 when discovery does not initially provide an IP endpoint. `DiscoveryCoordinator.connect`
 resolves a selected device before the engine queues its files. A `PeerDevice.transferLane`
 records the payload route independently of how the peer was discovered. Do not mark a
-Bluetooth advertisement or a USB cable as a usable file transport without a reachable
-endpoint. The current transfer protocol requires IP sockets.
+Bluetooth advertisement or a USB cable as a usable file transport without a working endpoint.
+`DuplexConnection`/`ConnectionFactory` decouple control and payloads from IP. A native
+`FramedLink` is a flow-controlled stream multiplexer; `LinkRegistry` probes identity directly
+over it. Android's `BluetoothTransport` and `UsbTransport` are registered in `AppContainer`.
 
-## Remaining limitations and validation
+## Swarm, relay and desktop use
 
-* **No PKI.** Compare safety codes or exchange pairing codes through a trusted channel.
-  Discovery names and device IDs are not authentication. Encryption without verification
-  does not protect against an active man-in-the-middle.
-* **Resume is session-scoped.** Receiver partial bytes survive broken connections, not a
-  process restart. Cache orphans are cleaned on startup. Prefix verification re-reads the
-  prefix; it is not a Merkle-tree or cross-process resume protocol.
-* **Staging uses extra storage.** A completed file temporarily needs both the private staged
-  copy and its destination copy while publishing. Insufficient space causes a visible failure.
-* **Swarm and multi-hop relay remain planning models**, not working transport schedulers.
-  Raw USB accessory mode, Bluetooth RFCOMM payloads, and a desktop/CLI implementation are
-  also not implemented. USB **tethering** and BLE **discovery** are narrower capabilities.
-* Wi-Fi Direct, Bluetooth permission behavior and tethering need the physical-device
-  acceptance tests in [docs/DEVICE_TESTS.md](docs/DEVICE_TESTS.md).
-* See [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for the iteration checklist and
-  build/test results. Implemented does not mean hardware-validated.
+1. Exchange **current pairing codes** with the final destination using a trusted channel.
+   Helper delivery requires a full SHA-256 identity pin; old short-fingerprint codes alone
+   are deliberately insufficient. Comparing a new direct-transfer safety code also saves a full pin.
+2. Helpers enable **Settings → Helper mode**. The default is off. Each route still asks
+   separately, naming the source fingerprint, next peer and byte quota. Approve on Drop or
+   Settings; revoke grants from Settings.
+3. On Drop choose **Swarm** for independent helpers or **Relay chain** for ordered hops.
+   Select a distinct final destination, pick helpers, then Send. The destination approves
+   its own files separately. Helpers handle encrypted assignments, not plaintext files.
+4. See [docs/CLI.md](docs/CLI.md) for desktop installation, direct sends, offline route
+   directories, helper commands and retry. See [docs/MESH_PROTOCOL.md](docs/MESH_PROTOCOL.md)
+   for authenticated wire messages, resource limits and recovery behavior.
+
+## Limitations and validation
+
+* **No PKI or automatic trust.** Discovery names/IDs are not authentication. Exchange full
+  pairing codes securely or compare safety codes. Metadata (names, sizes, identities and
+  route) is visible to consenting helpers; payloads are encrypted to the final destination.
+* **Explicit, bounded routes**, not an automatic mesh-routing/distributed-storage network.
+  Four helper paths, three helper hops per path, four source assignments in flight,
+  1 MiB chunks, at most 8,192 chunks and 1,024 files per mesh manifest. Helper grants are
+  30 minutes, at most 1 GiB **wire traffic** each, with a 32 MiB staging cache and two forwards
+  at once. The conservative source quota estimate can reject large batches; split them.
+* **Durable recovery is not restored consent.** Encrypted batches recover immutable metadata
+  and verified bytes with new approval/keys. Outgoing jobs require explicit Retry. Revoked
+  or non-persistable document access fails visibly; the user must select those files again.
+  Helper permissions and AES keys never persist. Cache/journal expiration can require a new batch.
+* **Publication has a crash window.** Receipts make normal retries idempotent, but a crash
+  between OS publication and durable receipt creation can leave a duplicate on retry.
+  Exactly-once MediaStore/filesystem publication across process death is not claimed.
+* **Extra private storage** is needed for source snapshots, receiver chunks/prefixes and
+  final assembly. Local filesystem permissions protect CLI keys; they are not hardware-backed.
+* **Hardware validation pending:** RFCOMM permissions/pairing, USB AOA roles/re-enumeration,
+  OEM behavior, Wi-Fi Direct, MediaStore, background execution and real detach/reconnect.
+  Desktop raw USB/libusb integration is not bundled; AOA host/accessory adapters currently
+  live on Android. The CLI supports TCP and OS-configured duplex serial/RFCOMM endpoints.
+* Build/test evidence is in [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md); the manual
+  matrix is [docs/DEVICE_TESTS.md](docs/DEVICE_TESTS.md). Implementation is not hardware validation.
 
 ## Why Compose + coroutines + zero network dependencies
 
 The app is Kotlin + Jetpack Compose with `StateFlow` all the way down, and the entire
 networking layer is `java.net` sockets plus `org.json`. That keeps the APK small, makes the
-protocol trivially portable to a future desktop/CLI client, and means the interesting code
+protocol shared with the JVM desktop/CLI client, and means the interesting code
 is MeshDrop's own — not a framework's.
