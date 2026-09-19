@@ -131,8 +131,10 @@ class TransferServerResumeTest {
                 socket.shutdownOutput()
                 assertEquals(500, BufferedInputStream(socket.getInputStream()).readResponse().status)
             }
-            val partial = ControlMessages.parseBatchStatus(request(server, "GET", "${TransferProtocol.PATH_STATUS}?batchId=batch")
-                .bodyText())!!.partialFiles.getValue("file")
+            val statusReply = request(server, "GET", "${TransferProtocol.PATH_STATUS}?batchId=batch")
+            val partials = ControlMessages.parseBatchStatus(statusReply.bodyText())!!.partialFiles
+            assertTrue("Resume prefix missing: ${statusReply.bodyText()}", partials.containsKey("file"))
+            val partial = partials.getValue("file")
             assertEquals(65536L, partial.bytes)
             assertTrue(published.isEmpty())
             handler.key = ByteArray(32) { 2 }

@@ -140,11 +140,11 @@ Interrupted payloads are staged in app-private cache, never published to Downloa
 keeps the original manifest, negotiates fresh keys, skips complete files and sends only the
 suffix whose prefix checksum matches both devices. `Range: bytes=<offset>-` is accompanied
 by `X-MeshDrop-Prefix-SHA256`; invalid offsets or prefixes are rejected. Incomplete batches
-are not finalized. Cancellation closes sockets and deletes partials; completed receipts are
-retained for idempotent completion retries. Idle partial batches expire after 30 minutes
-when a new handshake arrives, and at most 64 retained batches are kept.
+are not finalized. Receiver cancellation closes sockets and deletes partials; completed
+receipts are retained for idempotent completion retries. Idle partial batches expire after
+30 minutes when a new handshake arrives; admission limits bound retained state and open connections.
 
- Errors are JSON (`{"error": "…"}`) with real
+Errors are JSON (`{"error": "…"}`) with real
 status codes (`403` rejected, `408` no answer, `426` protocol too new).
 
 Throughput is measured with a windowed average, UI updates are throttled to ~10/s so a

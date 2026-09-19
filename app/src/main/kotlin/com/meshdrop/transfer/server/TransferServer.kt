@@ -274,6 +274,19 @@ class TransferServer(
         input: BufferedInputStream,
         output: BufferedOutputStream,
     ) {
+        // Commit/close the file and release its writer slot BEFORE the peer sees a reply.
+        // Otherwise an immediate status/retry races the finally block and misses the prefix.
+        val reply = java.io.ByteArrayOutputStream()
+        receiveUpload(head, input, BufferedOutputStream(reply))
+        output.write(reply.toByteArray())
+        output.flush()
+    }
+
+    private suspend fun receiveUpload(
+        head: Http.RequestHead,
+        input: BufferedInputStream,
+        output: BufferedOutputStream,
+    ) {
         val segments = head.segments()
         if (segments.size < 4) {
             output.writeError(400, "Bad Request", "Expected /meshdrop/upload/<batchId>/<fileId>")
