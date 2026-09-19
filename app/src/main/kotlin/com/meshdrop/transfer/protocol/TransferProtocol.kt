@@ -275,14 +275,16 @@ object ControlMessages {
     fun parseHandshake(body: String): HandshakeRequest? = runCatching {
         val json = JSONObject(body)
         val batchId = json.optString(K_BATCH)
-        if (batchId.isBlank()) return null
+        if (!batchId.matches(Regex("[A-Za-z0-9_.-]{1,128}"))) return null
         val filesArray = json.optJSONArray(K_FILES) ?: return null
+        if (filesArray.length() !in 1..1024) return null
         val files = mutableListOf<FileMeta>()
         for (index in 0 until filesArray.length()) {
-            val entry = filesArray.optJSONObject(index) ?: continue
+            val entry = filesArray.optJSONObject(index) ?: return null
             val id = entry.optString(K_ID)
             val name = entry.optString(K_NAME)
-            if (id.isBlank() || name.isBlank()) continue
+            if (!id.matches(Regex("[A-Za-z0-9_.-]{1,128}")) || name.isBlank() || name.length > 255) return null
+            if (entry.optLong(K_SIZE, -1) < 0) return null
             files += FileMeta(
                 id = id,
                 name = name,
@@ -290,7 +292,10 @@ object ControlMessages {
                 mime = entry.optString(K_MIME).takeIf { it.isNotBlank() },
             )
         }
-        if (files.isEmpty()) return null
+        if (files.map { it.id }.distinct().size != files.size) return null
+        // Catch overflow before storage budgets or progress counters see the manifest.
+        files.fold(0L) { total, file -> Math.addExact(total, file.size) }
+        if (json.has(K_SECURITY) && parseSecurityOffer(json.optJSONObject(K_SECURITY)) == null) return null
         HandshakeRequest(
             version = json.optInt(K_VERSION, TransferProtocol.VERSION),
             batchId = batchId,

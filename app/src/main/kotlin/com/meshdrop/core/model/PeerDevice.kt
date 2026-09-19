@@ -5,9 +5,8 @@ import java.net.InetAddress
 /**
  * How a peer was found.
  *
- * The MVP only ships [LAN_NSD] and [LAN_BEACON]; [WIFI_DIRECT] and [BLUETOOTH] exist so the
- * UI and the coordinator can already talk about them, and so a future strategy has nothing
- * to change outside of `discovery/`.
+ * Wi-Fi Direct can form a group on selection. Bluetooth is discovery only; the payload
+ * lane is recorded separately on [PeerDevice].
  */
 enum class DiscoveryKind(val label: String) {
     LAN_NSD("Wi-Fi"),

@@ -14,7 +14,6 @@ import android.os.ParcelUuid
 import com.meshdrop.core.discovery.BleEndpoint
 import com.meshdrop.core.model.DiscoveryKind
 import com.meshdrop.core.model.PeerDevice
-import com.meshdrop.core.model.TransportLane
 import com.meshdrop.discovery.api.DiscoveryStrategy
 import com.meshdrop.discovery.api.LocalIdentity
 import com.meshdrop.discovery.api.StrategyStatus
@@ -49,14 +48,16 @@ class BluetoothDiscoveryStrategy(context: Context, private val scope: CoroutineS
     override val status = state.asStateFlow()
     private val found = MutableStateFlow<List<PeerDevice>>(emptyList())
     override val peers = found.asStateFlow()
-    private var identity: LocalIdentity? = null
+    @Volatile private var identity: LocalIdentity? = null
     private var advertising: Job? = null
-    private var scanning = false
+    @Volatile private var scanning = false
     private val probes = ConcurrentHashMap<String, Long>()
-    private var generation = 0
+    @Volatile private var generation = 0
 
     private val advertiseCallback = object : AdvertiseCallback() {
-        override fun onStartSuccess(settings: AdvertiseSettings) { state.update { it.copy(advertising = true, error = null) } }
+        override fun onStartSuccess(settings: AdvertiseSettings) {
+            if (advertising?.isActive == true) state.update { it.copy(advertising = true, error = null) }
+        }
         override fun onStartFailure(errorCode: Int) { state.update { it.copy(advertising = false, error = "Bluetooth advertising failed ($errorCode)") } }
     }
     private val scanCallback = object : ScanCallback() {
@@ -69,6 +70,7 @@ class BluetoothDiscoveryStrategy(context: Context, private val scope: CoroutineS
     }
 
     private fun onScanResultInternal(result: ScanResult) {
+        if (!scanning) return
         val endpoint = result.scanRecord?.getServiceData(SERVICE)?.let { BleEndpoint.decode(it) } ?: return
         val key = "${endpoint.host.hostAddress}:${endpoint.port}"
         val now = System.currentTimeMillis()

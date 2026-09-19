@@ -21,7 +21,7 @@ device-to-device over a plain TCP socket. **No accounts, no cloud, no server.**
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Feature status — MVP
+## Feature status
 
 | Capability | State |
 | --- | --- |
@@ -35,7 +35,12 @@ device-to-device over a plain TCP socket. **No accounts, no cloud, no server.**
 | Vault for received files | ✅ app-private storage, gated by the device lock |
 | Live transfer telemetry | ✅ smoothed speed/ETA, steadiness, Canvas throughput graph — one tap away in *Details* |
 | Runs without internet/cloud/accounts | ✅ LAN only; identity is a random local device id |
-| Wi-Fi Direct / Bluetooth / USB-C transport | 🚧 seams in place, see [Adding a transport](#adding-a-transport) |
+| Wi-Fi Direct | Implemented: DNS-SD service discovery, explicit group connection, endpoint identity probe; physical-device validation pending |
+| Bluetooth-assisted discovery | Implemented: compact BLE endpoint advertisements + TCP identity probe; **payloads still use IP**, not Bluetooth |
+| USB tethering | Uses existing IP transfer/discovery; USB interface routes are labelled separately. Raw USB accessory mode is not implemented |
+| Resume interrupted files | Private staging + SHA-256 prefix verification + fresh encryption session on retry, within the receiver process lifetime |
+| Persistent activity and queued sends | App-private transfer log, bounded concurrent sends, one batch per peer |
+| Trust controls and pairing codes | Verification gate, authenticated trusted-device auto-accept, explicit pairing-code import/export |
 
 ## Screens
 
@@ -102,9 +107,14 @@ interface DiscoveryStrategy {
 * **`UdpBeaconDiscoveryStrategy`** — a one-packet `MESHDROP/1|<id>|<port>|<name>` broadcast
   every 3 s on UDP 45821. It is the fallback for routers, guest networks and OEM skins that
   break mDNS, and it costs a few bytes per second.
-* **`WifiDirectDiscoveryStrategy` / `BluetoothDiscoveryStrategy`** — registered but
-  `isAvailable = false`. They exist so the UI, the coordinator and the merge logic already
-  understand them.
+* **`WifiDirectDiscoveryStrategy`** — advertises the same identity through Wi-Fi P2P
+  DNS-SD. Selecting a peer forms a group through Android's approval flow. The owner endpoint
+  is identity-probed; when this phone is the owner, discovery waits for the peer's IP beacon.
+* **`BluetoothDiscoveryStrategy`** — advertises a seven-byte IP endpoint in BLE service
+  data and resolves identity with the existing TCP ping. It is a LAN discovery fallback,
+  not an RFCOMM file transport, and requires a reachable local IP network.
+* Discovery and payload transport are distinct: P2P and USB-tethered IP interfaces are
+  identified by their connected subnet so Activity does not call a cable transfer Wi-Fi.
 
 `DiscoveryCoordinator` merges everything into one list: duplicates (the same physical device
 found by two transports) are collapsed by device id preferring the entry that can actually be
@@ -121,7 +131,20 @@ dependencies**, and is readable with `nc`:
 | 2 | `PUT /meshdrop/upload/<batchId>/<fileId>` | one connection per file, raw bytes, `Content-Length` framing |
 | 3 | `POST /meshdrop/complete?batchId=…` | tidy-up, reports how many files landed |
 
-Also: `GET /meshdrop/ping` for a liveness probe. Errors are JSON (`{"error": "…"}`) with real
+Also: `GET /meshdrop/ping` for a liveness probe, `GET /meshdrop/status?batchId=…`
+for completed files and verified resume prefixes, and `GET /meshdrop/ready?batchId=…`
+for an optional receiver verification gate. The gate is advertised in the acceptance
+response so new senders wait before uploading. Older senders are still gated at the receiver.
+
+Interrupted payloads are staged in app-private cache, never published to Downloads. A retry
+keeps the original manifest, negotiates fresh keys, skips complete files and sends only the
+suffix whose prefix checksum matches both devices. `Range: bytes=<offset>-` is accompanied
+by `X-MeshDrop-Prefix-SHA256`; invalid offsets or prefixes are rejected. Incomplete batches
+are not finalized. Cancellation closes sockets and deletes partials; completed receipts are
+retained for idempotent completion retries. Idle partial batches expire after 30 minutes
+when a new handshake arrives, and at most 64 retained batches are kept.
+
+ Errors are JSON (`{"error": "…"}`) with real
 status codes (`403` rejected, `408` no answer, `426` protocol too new).
 
 Throughput is measured with a windowed average, UI updates are throttled to ~10/s so a
@@ -153,7 +176,12 @@ Every transfer negotiates an ephemeral session before a single byte moves:
    `/receive`, `/sas`): a send key, a receive key, and the **safety code** — six digits the two
    humans compare out loud.
 4. The payload is framed as `length ‖ nonce ‖ ciphertext+tag` with **AES-256-GCM** per 64 KB
-   chunk; the nonce is `salt ‖ counter`, so no nonce is ever reused.
+   chunk; the nonce is `salt ‖ counter`. Streaming counters are allocated across all files,
+   not reset per file. Frame sizes are bounded before allocation.
+5. Remembered trust uses the fingerprint **derived from the signing key**, never a claimed
+   fingerprint alone. Auto-accept requires encryption, a valid signature and remembered
+   identity. With verification required, compare codes from the active transfer before bytes
+   move; an unverified session times out rather than bypassing the setting.
 
 What the user sees of that:
 
@@ -203,8 +231,8 @@ app/src/main/kotlin/com/meshdrop/
 │   ├── api/                     DiscoveryStrategy + DiscoveryCoordinator  ← extension point
 │   ├── nsd/                     mDNS implementation
 │   ├── udp/                     broadcast beacon fallback
-│   ├── wifidirect/              stub + implementation notes
-│   └── bluetooth/               stub + implementation notes
+│   ├── wifidirect/              Wi-Fi P2P DNS-SD and group setup
+│   └── bluetooth/               BLE-assisted IP discovery
 ├── transfer/
 │   ├── protocol/                Http.kt (framing) + TransferProtocol.kt (messages, v2)
 │   ├── server/                  TransferServer (receive side)
@@ -262,39 +290,32 @@ Navigation 2.8.3 · Material 3. Dependencies are centralised in
 `adb logcat -s MeshDrop:*` shows the whole conversation, including the HTTP requests the
 peer is making.
 
-## Adding a transport (Wi-Fi Direct, Bluetooth, …)
+## Adding a transport
 
-Everything needed is already in place; a new transport is one class and one line:
+Implement `DiscoveryStrategy`, register it in `AppContainer`, and override `connect(peer)`
+when discovery does not initially provide an IP endpoint. `DiscoveryCoordinator.connect`
+resolves a selected device before the engine queues its files. A `PeerDevice.transferLane`
+records the payload route independently of how the peer was discovered. Do not mark a
+Bluetooth advertisement or a USB cable as a usable file transport without a reachable
+endpoint. The current transfer protocol requires IP sockets.
 
-```kotlin
-class WifiDirectDiscoveryStrategy(context: Context, scope: CoroutineScope) : DiscoveryStrategy {
-    override val kind = DiscoveryKind.WIFI_DIRECT
-    override val peers: StateFlow<List<PeerDevice>> = …   // WifiP2pManager.requestPeers()
-    override suspend fun startScan() { … }                // WifiP2pManager.discoverPeers()
-}
-```
+## Remaining limitations and validation
 
-then register it in `AppContainer.discoveryStrategies`. `requestGroupInfo` gives you the
-group-owner address: run the **same** `TransferServer` on it and report the port through
-`LocalIdentity` — the coordinator, the engine, the protocol and every screen are
-unchanged. The same applies to Bluetooth (BLE advertising for discovery, RFCOMM only for
-the "let's set up a group" control message, files still over TCP).
-
-## Known limitations of the MVP
-
-* **Encryption without a PKI.** There is no certificate authority here: trust comes from humans
-  comparing six digits once. Skip the comparison and you are encrypted but technically open to
-  an active man-in-the-middle on the LAN — which is exactly why the UI says *Unverified* and
-  never shows a padlock until you do.
-* **No resume.** A dropped transfer restarts from zero; per-chunk Merkle verification (so a
-  partial transfer could be resumed and re-checked) is the natural next step after integrity
-  is already per-chunk.
-* Single batch at a time per peer; concurrent senders queue on the server's accept loop.
-* Swarm splitting and relay routing are modelled (`PeerContribution`, lane failover, route
-  topology) but not yet driven by the transport — the UI is ready, the scheduler is not.
-* The transfer log that History renders lives in memory for the session; vaulted files,
-  verified peers and preferences are persisted.
-* Cancelling a *receiving* transfer stops new files; the file already in flight finishes.
+* **No PKI.** Compare safety codes or exchange pairing codes through a trusted channel.
+  Discovery names and device IDs are not authentication. Encryption without verification
+  does not protect against an active man-in-the-middle.
+* **Resume is session-scoped.** Receiver partial bytes survive broken connections, not a
+  process restart. Cache orphans are cleaned on startup. Prefix verification re-reads the
+  prefix; it is not a Merkle-tree or cross-process resume protocol.
+* **Staging uses extra storage.** A completed file temporarily needs both the private staged
+  copy and its destination copy while publishing. Insufficient space causes a visible failure.
+* **Swarm and multi-hop relay remain planning models**, not working transport schedulers.
+  Raw USB accessory mode, Bluetooth RFCOMM payloads, and a desktop/CLI implementation are
+  also not implemented. USB **tethering** and BLE **discovery** are narrower capabilities.
+* Wi-Fi Direct, Bluetooth permission behavior and tethering need the physical-device
+  acceptance tests in [docs/DEVICE_TESTS.md](docs/DEVICE_TESTS.md).
+* See [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for the iteration checklist and
+  build/test results. Implemented does not mean hardware-validated.
 
 ## Why Compose + coroutines + zero network dependencies
 

@@ -2,16 +2,11 @@ package com.meshdrop.transfer.server
 
 import com.meshdrop.core.resume.PartialFile
 import com.meshdrop.transfer.protocol.PartialStatus
-import com.meshdrop.core.integrity.StreamingDigest
-import com.meshdrop.core.integrity.toHex
 import com.meshdrop.core.model.IncomingRequest
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.util.MeshLog
-import com.meshdrop.data.ReceivedFileSink
 import com.meshdrop.data.IncomingFileStore
 import com.meshdrop.transfer.crypto.SecureFrames
-import com.meshdrop.transfer.crypto.SecurityOffer
-import com.meshdrop.transfer.crypto.SessionKeys
 import com.meshdrop.transfer.crypto.toDto
 import com.meshdrop.transfer.crypto.toOffer
 import com.meshdrop.transfer.protocol.BatchStatus
@@ -24,7 +19,6 @@ import com.meshdrop.transfer.protocol.Http.readExactly
 import com.meshdrop.transfer.protocol.Http.readRequestHead
 import com.meshdrop.transfer.protocol.Http.writeError
 import com.meshdrop.transfer.protocol.Http.writeJson
-import com.meshdrop.transfer.protocol.Http.writeResponse
 import com.meshdrop.transfer.protocol.TransferProtocol
 import com.meshdrop.transfer.protocol.UploadAck
 import kotlinx.coroutines.CoroutineScope
@@ -35,8 +29,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
-import java.security.DigestOutputStream
-import java.security.MessageDigest
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
@@ -190,6 +182,10 @@ class TransferServer(
             output.writeError(400, "Bad Request", "Malformed handshake")
             return
         }
+        if (request.version < 1) {
+            output.writeError(400, "Bad Request", "Invalid protocol version")
+            return
+        }
         if (request.version > TransferProtocol.VERSION) {
             output.writeError(426, "Upgrade Required", "Peer speaks protocol v${request.version}")
             return
@@ -212,61 +208,61 @@ class TransferServer(
             return
         }
         try {
-        val previous = batches[request.batchId]
-        if (previous != null && (previous.request.senderId != request.senderId ||
-                previous.fingerprint != request.security?.fingerprint ||
-                previous.request.files.map { listOf(it.id, it.name, it.sizeBytes, it.mimeType) } !=
-                request.files.map { listOf(it.id, it.name, it.size, it.mime) } ||
-                previous.writing.isNotEmpty())) {
-            output.writeError(409, "Conflict", "Batch identity or manifest changed, or upload is active")
-            return
-        }
-        previous?.lastActivity = System.currentTimeMillis()
-        val files = request.files.map { meta ->
-            TransferFile(
-                id = meta.id,
-                name = meta.name,
-                sizeBytes = meta.size,
-                mimeType = meta.mime,
+            val previous = batches[request.batchId]
+            if (previous != null && (previous.request.senderId != request.senderId ||
+                    previous.fingerprint != request.security?.fingerprint ||
+                    previous.request.files.map { listOf(it.id, it.name, it.sizeBytes, it.mimeType) } !=
+                    request.files.map { listOf(it.id, it.name, it.size, it.mime) } ||
+                    previous.writing.isNotEmpty())) {
+                output.writeError(409, "Conflict", "Batch identity or manifest changed, or upload is active")
+                return
+            }
+            previous?.lastActivity = System.currentTimeMillis()
+            val files = request.files.map { meta ->
+                TransferFile(
+                    id = meta.id,
+                    name = meta.name,
+                    sizeBytes = meta.size,
+                    mimeType = meta.mime,
+                )
+            }
+            val incoming = IncomingRequest(
+                batchId = request.batchId,
+                senderId = request.senderId,
+                senderName = request.senderName,
+                senderAddress = "",
+                files = files,
+                totalBytes = files.sumOf { it.sizeBytes },
             )
-        }
-        val incoming = IncomingRequest(
-            batchId = request.batchId,
-            senderId = request.senderId,
-            senderName = request.senderName,
-            senderAddress = "",
-            files = files,
-            totalBytes = files.sumOf { it.sizeBytes },
-        )
 
-        // Keys are derived before the user decides, so the safety code can be shown
-        // alongside the "accept?" question rather than after it.
-        handler.negotiateKeys(request.batchId, request.security?.toOffer())
+            // Keys are derived before the user decides, so the safety code can be shown
+            // alongside the "accept?" question rather than after it.
+            handler.negotiateKeys(request.batchId, request.security?.toOffer())
 
-        // Long poll: the peer waits here until a human taps Accept or Reject.
-        val accepted = withTimeoutOrNull(TransferProtocol.HANDSHAKE_TIMEOUT_MS.toLong()) {
-            handler.requestApproval(incoming)
-        }
-
-        when (accepted) {
-            true -> {
-                if (!isRunning) return
-                batches[request.batchId] = previous ?: BatchState(incoming, request.security?.fingerprint)
-                output.writeJson(200, "OK", with(ControlMessages) {
-                    HandshakeResponse(HandshakeResponse.Decision.ACCEPTED,
-                        security = handler.localMaterialFor(request.batchId)?.toDto(),
-                        requiresVerification = handler.verificationRequired).toJson()
-                })
+            // Long poll: the peer waits here until a human taps Accept or Reject.
+            val accepted = withTimeoutOrNull(TransferProtocol.HANDSHAKE_TIMEOUT_MS.toLong()) {
+                handler.requestApproval(incoming)
             }
 
-            false -> {
-                output.writeJson(403, "Forbidden", rejectedJson())
-            }
+            when (accepted) {
+                true -> {
+                    if (!isRunning) return
+                    batches[request.batchId] = previous ?: BatchState(incoming, request.security?.fingerprint)
+                    output.writeJson(200, "OK", with(ControlMessages) {
+                        HandshakeResponse(HandshakeResponse.Decision.ACCEPTED,
+                            security = handler.localMaterialFor(request.batchId)?.toDto(),
+                            requiresVerification = handler.verificationRequired).toJson()
+                    })
+                }
 
-            null -> {
-                output.writeJson(408, "Request Timeout", timeoutJson())
+                false -> {
+                    output.writeJson(403, "Forbidden", rejectedJson())
+                }
+
+                null -> {
+                    output.writeJson(408, "Request Timeout", timeoutJson())
+                }
             }
-        }
         } finally {
             handshakes.remove(request.batchId)
         }
@@ -367,6 +363,8 @@ class TransferServer(
                     fileId, bytes, System.currentTimeMillis() - startedAt, digest, offset,
                 )))
             } catch (error: Exception) {
+                // Losing only the acknowledgement must not invalidate an already published file.
+                if (fileId in batch.completed) return
                 // Retain a disconnected transfer's prefix. Never retain corrupt or cancelled bytes.
                 if (batch.cancelled || error is javax.crypto.AEADBadTagException) {
                     batch.partials.remove(fileId)?.discard()
@@ -399,6 +397,10 @@ class TransferServer(
             ""
         }
         val report = ControlMessages.parseCompleteRequest(body, batchId)
+        if (report == null || report.batchId != batchId) {
+            output.writeError(400, "Bad Request", "Malformed completion report")
+            return
+        }
         val batch = batches[batchId]
         if (batch == null) {
             output.writeError(404, "Not Found", "Unknown batch")

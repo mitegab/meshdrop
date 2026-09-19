@@ -84,8 +84,8 @@ class AppContainer(val application: Application) {
      * Every way we know how to find a peer.
      *
      * mDNS is the primary mechanism; the UDP beacon is the fallback for networks where mDNS
-     * is filtered. Wi-Fi Direct and Bluetooth are registered but disabled: they exist so the
-     * rest of the app already handles them.
+     * is filtered. Wi-Fi Direct forms a user-approved group; Bluetooth advertises IP
+     * endpoints and does not carry file payloads itself.
      */
     val discoveryStrategies: List<DiscoveryStrategy> = listOf(
         NsdDiscoveryStrategy(application, applicationScope),
