@@ -115,8 +115,12 @@ been exercised on physical hardware in this environment.
   passed, including desktop storage tests and the **actual killed-JVM receiver / queued retry** smoke test.
 - `4525c55`: [CI 35466196753](https://github.com/mitegab/meshdrop/actions/runs/35466196753)
   passed again after verification-gated recovery/empty-file assembly and busy-link fixes.
-- Final follow-up iterations buffer physical USB reads (no one-byte bulk reads), tolerate
-  an absent helper during route setup, and test chunk/control failover after helper loss.
-  The final commit's CI result is recorded below once complete.
+- `932ce79`: [final code CI 35466618278](https://github.com/mitegab/meshdrop/actions/runs/35466618278)
+  passed **assembleDebug + :cli:installDist**, **testDebugUnitTest + :cli:test**, the real
+  killed-receiver subprocess smoke test and both APK/CLI artifact uploads. The final code
+  includes physical read buffering, absent-helper recovery and chunk/control failover tests.
+- The final tree contains **310 Android/core JVM test methods and 3 desktop JVM test methods**,
+  plus `scripts/cli_smoke.py`. `git diff --check`, Python AST parsing and Android/USB XML
+  parsing passed locally. Gradle execution remains remote because the sandbox has no JDK/SDK.
 
 These checks run on Linux JVMs. They do not certify USB AOA or Bluetooth hardware behavior.

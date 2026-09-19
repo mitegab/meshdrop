@@ -82,8 +82,9 @@ Direct encrypted transfers persist their immutable file metadata, verified full 
 fingerprint, private partial basenames and completion receipts. Atomic JSON journals contain
 checksummed payloads; writes fsync and replace the previous file. Partial basenames/canonical
 parents are validated. Actual file length and SHA-256 are recomputed rather than trusting
-saved offsets. Client and server both verify a resumed prefix. Plaintext/unauthenticated
-batches do not gain cross-process resume privileges.
+saved offsets. Client and server both verify a resumed prefix. Offers without a validated
+sender signing identity do not gain cross-process resume privileges. Disabling encryption
+still forfeits payload confidentiality/authentication; a journal does not upgrade that mode.
 
 Mesh destinations persist signed immutable manifests, chunk files and publication receipts.
 A fresh offer must match the same manifest and signing key. Restored chunks are rehashed,

@@ -148,7 +148,7 @@ are not finalized. Receiver cancellation closes sockets and deletes partials; co
 receipts are retained for idempotent completion retries. Encrypted, signature-validated batches
 have checksummed atomic journals; restoring never restores acceptance or session keys.
 Idle receiver journals expire lazily after 24 hours and are limited to 64; admission limits
-also bound open connections. Unauthenticated/plaintext resume remains process-local.
+also bound open connections. Unsigned transfers remain process-local.
 
 Errors are JSON (`{"error": "…"}`) with real
 status codes (`403` rejected, `408` no answer, `426` protocol too new).
