@@ -23,6 +23,7 @@ class MeshDropViewModelFactory(
         DropViewModel::class.java -> DropViewModel(
             controller = container.meshController,
             documents = container.documentRepository,
+            relay = container.meshService.relay,
         ) as T
 
         ActivityViewModel::class.java -> ActivityViewModel(
@@ -36,6 +37,10 @@ class MeshDropViewModelFactory(
             preferences = container.userPreferences,
             controller = container.meshController,
             verifiedPeers = container.verifiedPeers,
+            identityFingerprint = { com.meshdrop.core.persistence.AtomicJson.digest(container.deviceIdentity.publicKeyBytes) },
+            bluetoothTransport = container.bluetoothTransport,
+            usbTransport = container.usbTransport,
+            relay = container.meshService.relay,
         ) as T
 
         else -> throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

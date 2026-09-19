@@ -103,17 +103,15 @@ object Http {
     }
 
     @Throws(IOException::class)
-    fun BufferedInputStream.readResponse(): Response {
+    fun BufferedInputStream.readResponse(maxBodyBytes: Long = 256 * 1024L): Response {
         val statusLine = readLineCrlf() ?: throw IOException("Connection closed before response")
         val parts = statusLine.split(' ', limit = 3)
         if (parts.size < 2) throw IOException("Malformed status line: $statusLine")
         val status = parts[1].toIntOrNull() ?: throw IOException("Malformed status code: $statusLine")
         val headers = readHeaders()
         val length = headers["content-length"]?.toLongOrNull()
-        val body = when {
-            length != null && length >= 0 -> readExactly(length)
-            else -> readBytes()
-        }
+        if (length == null || length !in 0..maxBodyBytes) throw IOException("Invalid control response length")
+        val body = readExactly(length)
         return Response(status, parts.getOrNull(2).orEmpty(), headers, body)
     }
 
@@ -135,6 +133,10 @@ object Http {
         val query = if (queryIndex >= 0) target.substring(queryIndex + 1) else ""
         val headers = readHeaders()
         val lengthHeader = headers["content-length"]
+        if (headers.containsKey("transfer-encoding")) throw IOException("Transfer-Encoding is not supported")
+        if (lengthHeader != null && (lengthHeader.toLongOrNull()?.let { it < 0 } != false)) {
+            throw IOException("Invalid Content-Length")
+        }
         return RequestHead(
             method = parts[0].uppercase(),
             path = path,
@@ -246,6 +248,7 @@ object Http {
             val byte = read()
             if (byte == -1) return if (buffer.size() == 0) null else buffer.toString(StandardCharsets.UTF_8.name())
             if (byte == '\n'.code) return buffer.toString(StandardCharsets.UTF_8.name()).trimEnd('\r')
+            if (buffer.size() >= MAX_HEADER_BYTES) throw IOException("Header line too large")
             buffer.write(byte)
         }
     }

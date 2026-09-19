@@ -3,6 +3,7 @@ package com.meshdrop.transfer.crypto
 import java.io.BufferedInputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -33,11 +34,16 @@ object SecureFrames {
     private const val ALGORITHM = "AES/GCM/NoPadding"
     private const val TAG_BITS = TAG_BYTES * 8
 
+    // Shared across all file streams. A counter starting at zero per file reused the
+    // same nonce/key pair throughout a batch. Session keys are ephemeral across processes.
+    private val nextCounter = AtomicLong()
+
     /** Exact number of bytes [plaintextLength] becomes once framed and encrypted. */
     fun ciphertextLength(plaintextLength: Long, chunkSize: Int = CHUNK_SIZE): Long {
-        if (plaintextLength <= 0L) return 0L
-        val chunks = (plaintextLength + chunkSize - 1) / chunkSize
-        return chunks * (LENGTH_BYTES + NONCE_BYTES + TAG_BYTES) + plaintextLength
+        require(plaintextLength >= 0L && chunkSize in 1..CHUNK_SIZE)
+        if (plaintextLength == 0L) return 0L
+        val chunks = 1 + (plaintextLength - 1) / chunkSize
+        return Math.addExact(Math.multiplyExact(chunks, (LENGTH_BYTES + NONCE_BYTES + TAG_BYTES).toLong()), plaintextLength)
     }
 
     /** Upper bound on the plaintext inside [ciphertextLength] bytes (used for progress). */
@@ -73,8 +79,12 @@ object SecureFrames {
      * integrity guarantee the history screen's tick mark refers to.
      */
     fun decrypt(key: ByteArray, frame: ByteArray): ByteArray {
+        require(frame.size >= frameHeaderSize() + TAG_BYTES) { "Truncated frame" }
         val buffer = ByteBuffer.wrap(frame)
         val length = buffer.int
+        require(length in TAG_BYTES..(CHUNK_SIZE + TAG_BYTES) && length == frame.size - frameHeaderSize()) {
+            "Invalid frame length"
+        }
         val nonce = ByteArray(NONCE_BYTES)
         buffer.get(nonce)
 
@@ -115,19 +125,20 @@ object SecureFrames {
         chunkSize: Int = CHUNK_SIZE,
         onProgress: (plaintextBytes: Long) -> Unit,
     ): Long {
+        require(plaintextLength >= 0 && chunkSize in 1..CHUNK_SIZE)
         val buffer = ByteArray(chunkSize)
         var remaining = plaintextLength
-        var counter = 0L
         var written = 0L
 
         while (remaining > 0L) {
             val toRead = minOf(remaining, buffer.size.toLong()).toInt()
             source.readFully(buffer, toRead)
+            val counter = nextCounter.getAndIncrement()
+            check(counter >= 0) { "Nonce counter exhausted" }
             val frame = encrypt(key, salt, counter, buffer, 0, toRead)
             sink.write(frame)
             remaining -= toRead
             written += toRead
-            counter++
             onProgress(written)
         }
         sink.flush()
@@ -148,11 +159,13 @@ object SecureFrames {
         sink: OutputStream,
         onProgress: (plaintextBytes: Long) -> Unit,
     ): Long {
+        require(ciphertextLength >= 0)
         val header = ByteArray(LENGTH_BYTES + NONCE_BYTES)
         var remaining = ciphertextLength
         var written = 0L
 
         while (remaining > 0L) {
+            if (remaining < header.size + TAG_BYTES) throw java.io.EOFException("Truncated frame header")
             source.readFully(header, header.size)
             remaining -= header.size
 
@@ -160,7 +173,7 @@ object SecureFrames {
             val length = buffer.int
             val nonce = ByteArray(NONCE_BYTES)
             buffer.get(nonce)
-            if (length <= TAG_BYTES || length > remaining) {
+            if (length <= TAG_BYTES || length > CHUNK_SIZE + TAG_BYTES || length > remaining) {
                 throw javax.crypto.AEADBadTagException("Implausible frame length: $length")
             }
 

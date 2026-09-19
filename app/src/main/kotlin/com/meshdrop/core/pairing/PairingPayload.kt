@@ -72,9 +72,9 @@ object PairingPayload {
         // Whitespace runs (a code pasted across two lines, a name typed with a double
         // space) collapse to one space; each field is then trimmed.
         val cleaned = text.trim().replace(Regex("\\s+"), " ")
-        if (cleaned.isBlank()) return null
+        if (cleaned.isBlank() || cleaned.length > 512) return null
         val parts = cleaned.split(SEPARATOR).map { it.trim() }
-        if (parts.size < 7 || !parts.first().equals(PREFIX, ignoreCase = true)) return null
+        if (parts.size != 7 || !parts.first().equals(PREFIX, ignoreCase = true)) return null
 
         // The prefix is part of the checksum, but people type it in whatever case they
         // heard it in, so it is normalised before the checksum is checked.

@@ -18,6 +18,18 @@ import java.util.Locale
  */
 object LocalNetworkInfo {
 
+    fun laneForRemote(remote: InetAddress?): com.meshdrop.core.model.TransportLane {
+        if (remote == null) return com.meshdrop.core.model.TransportLane.WIFI_LAN
+        val interfaces = runCatching {
+            Collections.list(NetworkInterface.getNetworkInterfaces())
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { iface -> iface.interfaceAddresses.map {
+                    com.meshdrop.core.transport.InterfacePrefix(iface.name, it.address, it.networkPrefixLength.toInt())
+                } }
+        }.getOrDefault(emptyList())
+        return com.meshdrop.core.transport.IpTransport.laneFor(remote, interfaces)
+    }
+
     /**
      * The best IPv4 address of this device, preferring Wi-Fi. Returns null when the device
      * has no usable LAN address (airplane mode, mobile data only, hotspot, …).

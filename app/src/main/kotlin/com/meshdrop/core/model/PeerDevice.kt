@@ -5,15 +5,15 @@ import java.net.InetAddress
 /**
  * How a peer was found.
  *
- * The MVP only ships [LAN_NSD] and [LAN_BEACON]; [WIFI_DIRECT] and [BLUETOOTH] exist so the
- * UI and the coordinator can already talk about them, and so a future strategy has nothing
- * to change outside of `discovery/`.
+ * Wi-Fi Direct can form a group on selection. BLE advertisements and native RFCOMM
+ * share a discovery category; the actual payload lane/link is recorded on [PeerDevice].
  */
 enum class DiscoveryKind(val label: String) {
     LAN_NSD("Wi-Fi"),
     LAN_BEACON("Wi-Fi"),
     WIFI_DIRECT("Wi-Fi Direct"),
     BLUETOOTH("Bluetooth"),
+    USB("USB accessory"),
 }
 
 /**
@@ -28,6 +28,7 @@ val DiscoveryKind.lane: TransportLane
         DiscoveryKind.LAN_NSD, DiscoveryKind.LAN_BEACON -> TransportLane.WIFI_LAN
         DiscoveryKind.WIFI_DIRECT -> TransportLane.WIFI_DIRECT
         DiscoveryKind.BLUETOOTH -> TransportLane.BLUETOOTH
+        DiscoveryKind.USB -> TransportLane.USB
     }
 
 /**
@@ -47,12 +48,15 @@ data class PeerDevice(
     val host: InetAddress? = null,
     val port: Int = 0,
     val lastSeenMillis: Long = System.currentTimeMillis(),
+    /** Discovery does not necessarily carry the bytes (e.g. BLE-assisted LAN discovery). */
+    val transferLane: TransportLane = kind.lane,
+    val linkId: String? = null,
 ) {
     /** Address in the form `192.168.1.7:45821`, for display and logs. */
     val endpoint: String
-        get() = host?.hostAddress?.let { address ->
+        get() = linkId ?: host?.hostAddress?.let { address ->
             if (port > 0) "$address:$port" else address
         } ?: "resolving…"
 
-    fun isReachable(): Boolean = host != null && port > 0
+    fun isReachable(): Boolean = linkId != null || (host != null && port > 0)
 }

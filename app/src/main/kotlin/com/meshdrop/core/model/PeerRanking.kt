@@ -86,7 +86,7 @@ object PeerRanking {
             else -> "gone quiet"
         }
 
-        val lane = peer.kind.toLane()
+        val lane = peer.transferLane
         val laneBonus = when (lane.rank) {
             0 -> 12
             1 -> 8

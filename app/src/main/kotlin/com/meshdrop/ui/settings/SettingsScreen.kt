@@ -17,6 +17,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.text.selection.SelectionContainer
+import com.meshdrop.core.model.DiscoveryKind
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -66,11 +71,42 @@ fun SettingsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val helperMode by viewModel.helperMode.collectAsStateWithLifecycle()
+    val relayOffers by viewModel.relayOffers.collectAsStateWithLifecycle()
     val colors = MeshTheme.colors
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var renameDraft by remember { mutableStateOf<String?>(null) }
     val trusted = viewModel.trustedPeers()
+    val transports by viewModel.strategyStatuses.collectAsStateWithLifecycle()
+    var pairingOpen by remember { mutableStateOf(false) }
+    var pairingDraft by remember { mutableStateOf("") }
+    val pairing = com.meshdrop.core.pairing.PairingPayload.decode(pairingDraft)
+
+    if (pairingOpen) {
+        AlertDialog(
+            onDismissRequest = { pairingOpen = false },
+            title = { Text("Pair using a code") },
+            text = {
+                Column {
+                    Text("Share this code only through a channel you trust. A code verifies identity; it does not connect networks.")
+                    Spacer(Modifier.height(Space.md))
+                    SelectionContainer { Text(viewModel.pairingCode() ?: "Start receiving on Drop to show your code") }
+                    Spacer(Modifier.height(Space.md))
+                    OutlinedTextField(value = pairingDraft, onValueChange = { pairingDraft = it.take(512) },
+                        label = { Text("Other device's code") }, modifier = Modifier.fillMaxWidth())
+                    Text(if (pairing != null) "Trust ${pairing.deviceName}? Fingerprint: ${pairing.fingerprint}" else "Paste a complete MeshDrop pairing code.")
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = pairing != null, onClick = {
+                    if (viewModel.trustPairingCode(pairingDraft)) { pairingOpen = false; pairingDraft = "" }
+                }) { Text("Trust this device") }
+            },
+            dismissButton = { TextButton(onClick = { pairingOpen = false }) { Text("Close") } },
+        )
+    }
 
     LaunchedEffect(uiState.message) {
         uiState.message?.let {
@@ -106,6 +142,19 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.displayMedium,
                         color = colors.ink,
                     )
+                }
+            }
+
+            item(key = "helpers") {
+                ToggleRow(title = "Helper mode", subtitle = "Off by default. Ask before each encrypted relay route: up to 3 hops, 1 GiB per grant, 32 MiB cache, 2 forwards at once.",
+                    checked = helperMode, onCheckedChange = viewModel::setHelperMode)
+                TextButton(onClick = viewModel::revokeRelays) { Text("Revoke all relay permissions") }
+                relayOffers.forEach { offer ->
+                    Text("${offer.senderFingerprint} requests ${offer.bytes / (1024 * 1024)} MiB via ${offer.nextPeer}")
+                    Row {
+                        TextButton(onClick = { viewModel.decideRelay(offer.id, true) }) { Text("Allow this route") }
+                        TextButton(onClick = { viewModel.decideRelay(offer.id, false) }) { Text("Decline") }
+                    }
                 }
             }
 
@@ -155,6 +204,33 @@ fun SettingsScreen(
                     checked = uiState.vaultLock,
                     onCheckedChange = viewModel::setVaultLock,
                 )
+                Hairline()
+            }
+
+            item(key = "physical-links") {
+                Spacer(Modifier.height(Space.lg))
+                Eyebrow(text = "Without Wi-Fi")
+                Text("Bluetooth and USB carry encrypted files directly, not through tethering.", style = MaterialTheme.typography.bodyMedium)
+                TextAction(text = "Pair a Bluetooth device", onClick = {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS))
+                })
+                TextAction(text = "Make this phone discoverable", onClick = {
+                    runCatching { context.startActivity(android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                        .putExtra(android.bluetooth.BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120)) }
+                        .onFailure { viewModel.showMessage("Grant Bluetooth access first") }
+                })
+                viewModel.bluetoothDevices().forEach { (id, label) ->
+                    TextAction(text = "Connect Bluetooth: $label", onClick = { viewModel.connectBluetooth(id) })
+                }
+                viewModel.usbDevices().forEach { (id, label) ->
+                    TextAction(text = "Connect USB: $label", onClick = { viewModel.connectUsb(id) })
+                }
+                TextAction(text = "Refresh attached devices", onClick = { viewModel.showMessage("Attached devices refreshed") })
+                Hairline()
+            }
+
+            item(key = "pairing") {
+                TextAction(text = "Pair using a code", onClick = { pairingOpen = true })
                 Hairline()
             }
 
@@ -258,26 +334,30 @@ fun SettingsScreen(
                     TransportRow(
                         lane = TransportLane.WIFI_LAN,
                         title = "Wi-Fi network",
-                        subtitle = "Active · listening on port ${viewModel.localPort}",
-                        active = true,
+                        subtitle = if (viewModel.localPort > 0) "Listening on port ${viewModel.localPort}" else "Receiver paused",
+                        active = viewModel.localPort > 0,
                     )
                     TransportRow(
                         lane = TransportLane.WIFI_DIRECT,
                         title = "Wi-Fi Direct",
-                        subtitle = "Ready in the code, not enabled in this build",
-                        active = false,
+                        subtitle = transports[DiscoveryKind.WIFI_DIRECT]?.let {
+                            it.error ?: if (it.isActive) "Discovering nearby devices · tap a device to connect" else it.note ?: "Inactive"
+                        } ?: "Not supported on this device",
+                        active = transports[DiscoveryKind.WIFI_DIRECT]?.isActive == true,
                     )
                     TransportRow(
                         lane = TransportLane.BLUETOOTH,
                         title = "Bluetooth",
-                        subtitle = "Planned — for very small files, very slowly",
-                        active = false,
+                        subtitle = transports[DiscoveryKind.BLUETOOTH]?.let {
+                            it.error ?: if (it.isActive) "RFCOMM payloads and BLE discovery" else it.note ?: "Inactive"
+                        } ?: "Not supported on this device",
+                        active = transports[DiscoveryKind.BLUETOOTH]?.isActive == true,
                     )
                     TransportRow(
                         lane = TransportLane.USB,
                         title = "USB-C cable",
-                        subtitle = "Planned — the fastest lane there is",
-                        active = false,
+                        subtitle = transports[DiscoveryKind.USB]?.note ?: "Connect an AOA host/accessory above",
+                        active = transports[DiscoveryKind.USB]?.isActive == true,
                     )
                     Spacer(modifier = Modifier.height(Space.sm))
                 }

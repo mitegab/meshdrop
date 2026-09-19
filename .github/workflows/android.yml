@@ -57,7 +57,7 @@ jobs:
       - name: Compile and assemble the debug APK
         run: |
           set +e
-          ./gradlew assembleDebug --stacktrace > build.log 2>&1
+          ./gradlew assembleDebug :cli:installDist --stacktrace > build.log 2>&1
           code=$?
           if [ "$code" -ne 0 ]; then
             grep -E "^e: " build.log | head -15 | while IFS= read -r line; do
@@ -90,7 +90,7 @@ jobs:
       - name: Run JVM unit tests
         run: |
           set +e
-          ./gradlew testDebugUnitTest --stacktrace > test.log 2>&1
+          ./gradlew testDebugUnitTest :cli:test --stacktrace > test.log 2>&1
           code=$?
           if [ "$code" -ne 0 ]; then
             grep -E "^e: " test.log | head -15 | while IFS= read -r line; do
@@ -133,4 +133,30 @@ jobs:
         with:
           name: meshdrop-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: CLI smoke test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cli/build/install/meshdrop/bin/meshdrop --help
+          cli/build/install/meshdrop/bin/meshdrop identity --home "$RUNNER_TEMP/meshdrop-cli" --name "CI desktop"
+          cli/build/install/meshdrop/bin/meshdrop queue --home "$RUNNER_TEMP/meshdrop-cli"
+          set +e
+          python3 scripts/cli_smoke.py > smoke.log 2>&1
+          code=$?
+          cat smoke.log
+          if [ "$code" -ne 0 ]; then
+            { echo '### CLI subprocess smoke failed'; echo '```'; tail -80 smoke.log; echo '```'; } > smoke-comment.md
+            gh api --method POST "/repos/$GH_REPO/commits/${{ github.sha }}/comments" -F body=@smoke-comment.md || true
+          fi
+          exit "$code"
+
+      - name: Upload desktop CLI
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meshdrop-cli
+          path: cli/build/install/meshdrop/
           if-no-files-found: error

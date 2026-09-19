@@ -7,6 +7,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -41,12 +43,18 @@ fun MeshDropRoot(container: AppContainer) {
     val navController = rememberNavController()
     val factory = remember(container) { MeshDropViewModelFactory(container) }
 
+    val permissionScope = rememberCoroutineScope()
     var missingPermissions by remember {
-        mutableStateOf(AppPermissions.criticalMissing(context))
+        mutableStateOf(AppPermissions.missing(context))
     }
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions(),
-    ) { _ -> missingPermissions = AppPermissions.criticalMissing(context) }
+    ) { _ ->
+        missingPermissions = AppPermissions.missing(context)
+        permissionScope.launch {
+            if (container.meshController.localPort > 0) runCatching { container.meshController.refresh() }
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (missingPermissions.isNotEmpty()) {

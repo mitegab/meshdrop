@@ -24,6 +24,10 @@ class UserPreferences(context: Context) {
     /** Name shown to other devices on the network. */
     val deviceName: StateFlow<String> = _deviceName.asStateFlow()
 
+    private val _helperMode = MutableStateFlow(prefs.getBoolean("helper_mode", false))
+    val helperMode: StateFlow<Boolean> = _helperMode.asStateFlow()
+    fun setHelperMode(enabled: Boolean) { prefs.edit { putBoolean("helper_mode", enabled) }; _helperMode.value = enabled }
+
     /** Stable random id, generated on first launch. */
     val deviceId: String = prefs.getString(KEY_DEVICE_ID, null) ?: run {
         val generated = UUID.randomUUID().toString()

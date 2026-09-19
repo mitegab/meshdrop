@@ -5,6 +5,8 @@ import com.meshdrop.core.model.PeerDevice
 import com.meshdrop.core.util.MeshLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -70,9 +72,9 @@ class DiscoveryCoordinator(
         }
             .combine(sweep) { devices, _ ->
                 val cutoff = now() - peerTtl.inWholeMilliseconds
-                devices.filter { it.lastSeenMillis >= cutoff && it.host != null && it.port > 0 }
+                devices.filter { it.lastSeenMillis >= cutoff && it.isReachable() }
             }
-            .stateIn(scope, SharingStarted.WhileSubscribed(5_000), emptyList())
+            .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     val state: StateFlow<DiscoveryState> =
         combine(strategies.map { it.status }) { statuses: Array<StrategyStatus> ->
@@ -86,7 +88,10 @@ class DiscoveryCoordinator(
     /** Per-strategy detail, so the UI can explain why a transport found nothing. */
     val strategyStatuses: StateFlow<Map<DiscoveryKind, StrategyStatus>> =
         combine(strategies.map { it.status }) { statuses: Array<StrategyStatus> ->
-            strategies.mapIndexed { index, strategy -> strategy.kind to statuses[index] }.toMap()
+            strategies.mapIndexed { index, strategy -> strategy.kind to statuses[index] }.groupBy({ it.first }, { it.second })
+                .mapValues { (_, entries) -> StrategyStatus(entries.any { it.advertising }, entries.any { it.scanning },
+                    entries.mapNotNull { it.note }.distinct().joinToString(" · ").ifBlank { null },
+                    entries.mapNotNull { it.error }.distinct().joinToString(" · ").ifBlank { null }) }
         }.stateIn(scope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     init {
@@ -113,6 +118,18 @@ class DiscoveryCoordinator(
             runCatching {
                 if (strategy.isAvailable) strategy.startScan()
             }.onFailure { MeshLog.w(TAG, "${strategy.kind} scan failed", it) }
+        }
+    }
+
+    suspend fun connect(peer: PeerDevice): PeerDevice {
+        if (peer.isReachable()) return peer
+        val strategy = strategies.firstOrNull { it.kind == peer.kind }
+            ?: error("No transport can connect to this device")
+        val connected = strategy.connect(peer)
+        if (connected.isReachable()) return connected
+        return withTimeout(30_000) {
+            routes.first { list -> list.any { it.id == peer.id && it.isReachable() } }
+                .first { it.id == peer.id && it.isReachable() }
         }
     }
 
@@ -145,7 +162,7 @@ class DiscoveryCoordinator(
     }
 
     private fun PeerDevice.score(): Int =
-        (if (host != null) 100 else 0) + (if (port > 0) 10 else 0) +
+        (if (isReachable()) 100 else 0) + (if (port > 0) 10 else 0) +
             (lastSeenMillis / 1_000L).toInt().coerceAtMost(5)
 
     companion object {

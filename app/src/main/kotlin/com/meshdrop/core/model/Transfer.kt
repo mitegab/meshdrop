@@ -64,6 +64,7 @@ data class TransferJob(
     val lane: TransportLane = TransportLane.WIFI_LAN,
     /** Pipes this transfer already gave up on, oldest first — the route line draws them. */
     val previousLanes: List<TransportLane> = emptyList(),
+    val contributions: List<PeerContribution> = emptyList(),
     /** When the last switch happened, so the UI can animate it and then stop. */
     val laneChangedAtMillis: Long? = null,
     val startedAtMillis: Long = System.currentTimeMillis(),

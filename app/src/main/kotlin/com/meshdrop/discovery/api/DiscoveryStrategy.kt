@@ -61,4 +61,7 @@ interface DiscoveryStrategy {
     suspend fun startScan() {}
 
     suspend fun stopScan() {}
+
+    /** User-initiated connection setup for a peer that does not have an IP endpoint yet. */
+    suspend fun connect(peer: PeerDevice): PeerDevice = peer
 }

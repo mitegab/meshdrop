@@ -40,7 +40,7 @@ class AppContainer(val application: Application) {
     val receivedFileStore = ReceivedFileStore(application)
 
     /** Long-term device identity used to authenticate peers (Android Keystore). */
-    val deviceIdentity: DeviceIdentity = DeviceIdentity.create(application)
+    val deviceIdentity: DeviceIdentity = com.meshdrop.transfer.crypto.AndroidDeviceIdentity.create(application)
     val verifiedPeers = VerifiedPeers(application)
 
     /** Private storage for files the user moved out of shared storage. */
@@ -52,6 +52,10 @@ class AppContainer(val application: Application) {
     // Explicit types on both the engine and the controller: the engine asks the controller
     // for fallback routes and the controller holds the engine, and letting Kotlin infer the
     // pair makes it try to resolve the cycle at compile time.
+    val linkRegistry: com.meshdrop.transfer.link.LinkRegistry = com.meshdrop.transfer.link.LinkRegistry(applicationScope) { transferEngine.acceptLink(it) }
+    val bluetoothTransport = com.meshdrop.transport.BluetoothTransport(application, applicationScope, linkRegistry)
+    val usbTransport = com.meshdrop.transport.UsbTransport(application, applicationScope, linkRegistry)
+
     val transferEngine: TransferEngine = TransferEngine(
         scope = applicationScope,
         documentRepository = documentRepository,
@@ -62,8 +66,12 @@ class AppContainer(val application: Application) {
         localDeviceId = userPreferences.deviceId,
         localDeviceName = { userPreferences.deviceName.value },
         encryptionEnabled = { userPreferences.encryptionEnabled.value },
+        requireVerification = { userPreferences.requireVerification.value },
+        autoAcceptVerified = { userPreferences.autoAcceptVerified.value },
         storageVolume = { storageVolume() },
         logSink = transferLogFile,
+        sendJournal = com.meshdrop.core.persistence.SendJournal(application.filesDir),
+        connectionFactory = linkRegistry,
         alternativeRoutes = { deviceId: String -> meshController.alternativeRoutes(deviceId) },
     )
 
@@ -74,30 +82,45 @@ class AppContainer(val application: Application) {
      * not evidence the disk is full, and reporting 0 would refuse every transfer.
      */
     private fun storageVolume(): VolumeSpace = runCatching {
-        val path = application.getExternalFilesDir(null) ?: application.filesDir
-        StatFs(path.absolutePath).let { VolumeSpace(it.availableBytes, it.totalBytes) }
+        val paths = listOfNotNull(application.filesDir, application.getExternalFilesDir(null))
+        paths.map { StatFs(it.absolutePath) }.minBy { it.availableBytes }.let { VolumeSpace(it.availableBytes, it.totalBytes) }
     }.getOrElse { VolumeSpace.UNKNOWN }
 
     /**
      * Every way we know how to find a peer.
      *
      * mDNS is the primary mechanism; the UDP beacon is the fallback for networks where mDNS
-     * is filtered. Wi-Fi Direct and Bluetooth are registered but disabled: they exist so the
-     * rest of the app already handles them.
+     * is filtered. Wi-Fi Direct forms a user-approved group; Bluetooth advertises IP
+     * endpoints and does not carry file payloads itself.
      */
     val discoveryStrategies: List<DiscoveryStrategy> = listOf(
         NsdDiscoveryStrategy(application, applicationScope),
         UdpBeaconDiscoveryStrategy(applicationScope),
-        WifiDirectDiscoveryStrategy(),
-        BluetoothDiscoveryStrategy(),
+        WifiDirectDiscoveryStrategy(application, applicationScope),
+        BluetoothDiscoveryStrategy(application, applicationScope),
+        linkRegistry.strategy(com.meshdrop.core.model.DiscoveryKind.BLUETOOTH),
+        linkRegistry.strategy(com.meshdrop.core.model.DiscoveryKind.USB),
     )
 
     val discoveryCoordinator = DiscoveryCoordinator(discoveryStrategies, applicationScope)
+
+    val meshService: com.meshdrop.transfer.mesh.MeshService = com.meshdrop.transfer.mesh.MeshService(
+        com.meshdrop.transfer.mesh.MeshReceiver(java.io.File(application.filesDir, "mesh-incoming"),
+            userPreferences.deviceId, { userPreferences.deviceName.value }, deviceIdentity, receivedFileStore, transferEngine),
+        com.meshdrop.transfer.mesh.RelayService(userPreferences.deviceId, java.io.File(application.cacheDir, "relay"),
+            { discoveryCoordinator.peers.value }, com.meshdrop.transfer.mesh.MeshRpc(linkRegistry), { userPreferences.helperMode.value }),
+    )
+    val meshSender = com.meshdrop.transfer.mesh.MeshSender(java.io.File(application.filesDir, "mesh-outgoing"),
+        com.meshdrop.transfer.client.AndroidPayloadSource(documentRepository, fileSpooler), deviceIdentity, verifiedPeers,
+        linkRegistry, { discoveryCoordinator.peers.value })
+    init { transferEngine.meshSender = meshSender; transferEngine.configureMesh(meshService) }
 
     val meshController = MeshController(
         preferences = userPreferences,
         discovery = discoveryCoordinator,
         engine = transferEngine,
         scope = applicationScope,
+        startLinks = { linkRegistry.start(); bluetoothTransport.start(); usbTransport.start() },
+        stopLinks = { bluetoothTransport.stop(); usbTransport.stop(); linkRegistry.close() },
     )
 }

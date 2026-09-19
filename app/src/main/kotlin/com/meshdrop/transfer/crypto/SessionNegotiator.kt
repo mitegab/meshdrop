@@ -41,6 +41,8 @@ data class SessionKeys(
     /** True when the peer proved it owns the identity key it claims. */
     val signatureValid: Boolean,
     val cipherSuite: String,
+    /** Full identity pin; the short fingerprint is only a human-facing label. */
+    val peerIdentityFingerprint: String? = null,
 )
 
 /**
@@ -98,7 +100,10 @@ class SessionNegotiator(
             .onFailure { MeshLog.w(TAG, "ECDH failed, falling back to plaintext", it) }
             .getOrNull() ?: return null
 
-        val signatureValid = IdentityVerifier.verify(
+        // A claimed fingerprint is not proof of identity. Derive it from the key whose
+        // signature is checked, or an attacker could name any remembered fingerprint.
+        val fingerprint = IdentityVerifier.fingerprintOf(peer.identityPublicKey)
+        val signatureValid = fingerprint.equals(peer.fingerprint, ignoreCase = true) && IdentityVerifier.verify(
             identityPublicKey = peer.identityPublicKey,
             signedData = peer.ephemeralPublicKey,
             signature = peer.signature,
@@ -123,10 +128,12 @@ class SessionNegotiator(
             receiveKey = receiveKey,
             nonceSalt = transcript.copyOfRange(0, 4),
             safetyCode = safetyCode(sasBytes),
-            peerFingerprint = peer.fingerprint,
-            peerRemembered = signatureValid && rememberedPeers.isVerified(peer.fingerprint),
+            peerFingerprint = fingerprint,
+            peerRemembered = signatureValid && (rememberedPeers.isVerified(fingerprint) ||
+                rememberedPeers.isVerified(com.meshdrop.core.persistence.AtomicJson.digest(peer.identityPublicKey))),
             signatureValid = signatureValid,
             cipherSuite = EncryptionMode.E2E_AES_256_GCM.cipherSuite ?: "unknown",
+            peerIdentityFingerprint = com.meshdrop.core.persistence.AtomicJson.digest(peer.identityPublicKey),
         )
     }
 

@@ -1,13 +1,13 @@
 package com.meshdrop.transfer.client
 
-import android.net.Uri
+import com.meshdrop.core.resume.PartialFile
+import com.meshdrop.transfer.protocol.PartialStatus
+import com.meshdrop.transfer.protocol.HttpRanges
 import com.meshdrop.core.integrity.StreamingDigest
 import com.meshdrop.core.integrity.toHex
 import com.meshdrop.core.model.PeerDevice
 import com.meshdrop.core.model.TransferFile
 import com.meshdrop.core.util.MeshLog
-import com.meshdrop.data.DocumentRepository
-import com.meshdrop.data.FileSpooler
 import com.meshdrop.transfer.crypto.SecureFrames
 import com.meshdrop.transfer.crypto.TransferCrypto
 import com.meshdrop.transfer.crypto.toDto
@@ -27,13 +27,9 @@ import com.meshdrop.transfer.protocol.TransferProtocol
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.BufferedInputStream
-import java.io.File
-import java.io.FileInputStream
 import java.io.InputStream
-import java.net.InetSocketAddress
 import java.security.DigestInputStream
 import java.security.MessageDigest
-import java.net.Socket
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
@@ -55,8 +51,11 @@ data class SendOutcome(
     val outcomes: List<FileOutcome>,
     /** The receiver's verdict from `POST /meshdrop/complete`; null for a v2 peer. */
     val report: CompleteReport? = null,
+    val requiresVerification: Boolean = false,
+    val completionConfirmed: Boolean = true,
 ) {
-    val isSuccess: Boolean get() = accepted && outcomes.all { it.success } && report?.integrityFailed != true
+    val isSuccess: Boolean get() = accepted && outcomes.isNotEmpty() && outcomes.all { it.success } &&
+        report?.integrityFailed != true && completionConfirmed
 
     /** What the receiver said, when it said something worth repeating. */
     val integrityMessage: String? get() = report?.message
@@ -74,8 +73,8 @@ data class SendOutcome(
  * within one buffer.
  */
 class TransferClient(
-    private val documentRepository: DocumentRepository,
-    private val fileSpooler: FileSpooler,
+    private val payloadSource: PayloadSource,
+    private val connectionFactory: com.meshdrop.transfer.link.ConnectionFactory = com.meshdrop.transfer.link.ConnectionFactory.TCP,
 ) {
 
     /**
@@ -95,81 +94,104 @@ class TransferClient(
          * would only delay the first byte.
          */
         resume: Boolean = false,
+        onHandshakeAccepted: suspend () -> Unit = {},
         isCancelled: () -> Boolean = { false },
         onFileStarted: (fileId: String) -> Unit = {},
         onFileProgress: (fileId: String, bytesSent: Long, sizeBytes: Long, bytesPerSecond: Long) -> Unit = { _, _, _, _ -> },
         onFileFinished: (fileId: String, success: Boolean, message: String?) -> Unit = { _, _, _ -> },
     ): SendOutcome {
-        val host = peer.host
-        if (host == null || peer.port <= 0) {
-            return SendOutcome(false, "That device has no reachable address yet", emptyList())
-        }
-
-        val handshake = runCatching {
-            requestHandshake(peer, batchId, senderId, senderName, files, crypto)
-        }
-            .getOrElse { error ->
-                MeshLog.w(TAG, "Handshake with ${peer.name} failed", error)
-                return SendOutcome(false, readable(error), emptyList())
+        if (isCancelled()) return SendOutcome(false, "Cancelled", emptyList())
+        cancellationChecks[batchId] = isCancelled
+        try {
+            val host = peer.host
+            if (!peer.isReachable()) {
+                return SendOutcome(false, "That device has no reachable address yet", emptyList())
             }
 
-        if (!handshake.accepted) {
-            return SendOutcome(false, handshake.message, emptyList())
-        }
+            val handshake = runCatching {
+                requestHandshake(peer, batchId, senderId, senderName, files, crypto)
+            }
+                .getOrElse { error ->
+                    MeshLog.w(TAG, "Handshake with ${peer.name} failed", error)
+                    return SendOutcome(false, readable(error), emptyList())
+                }
 
-        val alreadyThere = if (resume) {
-            runCatching { fetchStatus(peer, batchId) }.getOrNull() ?: BatchStatus(batchId)
-        } else {
-            BatchStatus(batchId)
-        }
+            if (!handshake.accepted) {
+                return SendOutcome(false, handshake.message, emptyList())
+            }
 
-        val outcomes = ArrayList<FileOutcome>(files.size)
-        for (file in files) {
-            if (isCancelled()) break
-            if (alreadyThere.isComplete(file.id)) {
-                MeshLog.i(TAG, "Skipping ${file.name}: the receiver already has it")
-                outcomes += FileOutcome(file.id, true, file.sizeBytes, "Already on the other device")
+            onHandshakeAccepted()
+            if (handshake.requiresVerification && !isCancelled()) {
+                connect(peer, batchId).use { socket ->
+                    socket.soTimeout = TransferProtocol.HANDSHAKE_TIMEOUT_MS
+                    socket.getOutputStream().writeRequest("GET", "${TransferProtocol.PATH_READY}?batchId=$batchId")
+                    check(BufferedInputStream(socket.getInputStream()).readResponse().isSuccessful) {
+                        "The receiver did not verify the safety code"
+                    }
+                }
+            }
+            if (isCancelled()) return SendOutcome(false, "Cancelled", emptyList())
+            val alreadyThere = if (resume) {
+                runCatching { fetchStatus(peer, batchId) }.getOrNull() ?: BatchStatus(batchId)
+            } else {
+                BatchStatus(batchId)
+            }
+
+            val outcomes = ArrayList<FileOutcome>(files.size)
+            for (file in files) {
+                if (isCancelled()) break
+                if (alreadyThere.isComplete(file.id)) {
+                    MeshLog.i(TAG, "Skipping ${file.name}: the receiver already has it")
+                    outcomes += FileOutcome(file.id, true, file.sizeBytes, "Already on the other device")
+                    onFileStarted(file.id)
+                    onFileFinished(file.id, true, null)
+                    continue
+                }
+                currentCoroutineContext().ensureActive()
                 onFileStarted(file.id)
-                onFileFinished(file.id, true, null)
-                continue
-            }
-            currentCoroutineContext().ensureActive()
-            onFileStarted(file.id)
 
-            val outcome = runCatching {
-                uploadFile(peer, batchId, file, crypto, isCancelled, onFileProgress)
-            }.getOrElse { error ->
-                MeshLog.w(TAG, "Upload of ${file.name} failed", error)
-                FileOutcome(file.id, false, 0L, readable(error))
+                val outcome = runCatching {
+                    uploadFile(peer, batchId, file, crypto, isCancelled, onFileProgress, alreadyThere.partialFiles[file.id])
+                }.getOrElse { error ->
+                    MeshLog.w(TAG, "Upload of ${file.name} failed", error)
+                    FileOutcome(file.id, false, 0L, readable(error))
+                }
+                outcomes += outcome
+                onFileFinished(file.id, outcome.success, outcome.message)
             }
-            outcomes += outcome
-            onFileFinished(file.id, outcome.success, outcome.message)
-        }
 
-        // The digests travel at the end rather than in the handshake: the sender only knows
-        // them once it has read the file, and asking it to read every file twice to announce
-        // a checksum would double the time before the first byte moves.
-        val report = if (outcomes.isNotEmpty()) {
-            runCatching {
-                notifyComplete(
-                    peer = peer,
-                    batchId = batchId,
-                    files = outcomes.map { CompleteFile(it.fileId, it.bytesSent, it.digest) },
-                )
-            }.getOrElse { error ->
-                MeshLog.v(TAG, "Completion ping failed (peer may already be gone): ${error.message}")
+            // The digests travel at the end rather than in the handshake: the sender only knows
+            // them once it has read the file, and asking it to read every file twice to announce
+            // a checksum would double the time before the first byte moves.
+            var completionConfirmed = false
+            var completionError: String? = null
+            val report = if (!isCancelled() && outcomes.size == files.size && outcomes.all { it.success }) {
+                runCatching {
+                    notifyComplete(
+                        peer = peer,
+                        batchId = batchId,
+                        files = outcomes.map { CompleteFile(it.fileId, it.bytesSent, it.digest) },
+                    ).also { completionConfirmed = true }
+                }.getOrElse { error ->
+                    completionError = "Files sent, but the receiver did not confirm completion. Retry to check."
+                    MeshLog.v(TAG, "Completion ping failed: ${error.message}")
+                    null
+                }
+            } else {
                 null
             }
-        } else {
-            null
-        }
 
-        return SendOutcome(
-            accepted = true,
-            message = if (isCancelled()) "Cancelled" else report?.message,
-            outcomes = outcomes,
-            report = report,
-        )
+            return SendOutcome(
+                accepted = true,
+                message = if (isCancelled()) "Cancelled" else completionError ?: report?.message,
+                outcomes = outcomes,
+                report = report,
+                completionConfirmed = completionConfirmed,
+            )
+        } finally {
+            abort(batchId)
+            cancellationChecks.remove(batchId)
+        }
     }
 
     // region protocol steps ---------------------------------------------------------------
@@ -191,7 +213,7 @@ class TransferClient(
         )
         val body = with(ControlMessages) { request.toJson() }.toByteArray(StandardCharsets.UTF_8)
 
-        val socket = connect(peer)
+        val socket = connect(peer, batchId)
         socket.use {
             it.soTimeout = TransferProtocol.HANDSHAKE_TIMEOUT_MS
             it.getOutputStream().writeRequest(
@@ -207,7 +229,8 @@ class TransferClient(
                 crypto?.establish(parsed.security?.toOffer())
             }
             return when {
-                response.isSuccessful && parsed?.accepted == true -> SendOutcome(true, null, emptyList())
+                response.isSuccessful && parsed?.accepted == true ->
+                    SendOutcome(true, null, emptyList(), requiresVerification = parsed.requiresVerification)
                 response.status == 403 -> SendOutcome(false, parsed?.message ?: "The receiver declined", emptyList())
                 response.status == 408 -> SendOutcome(false, "The receiver did not answer in time", emptyList())
                 else -> SendOutcome(
@@ -228,114 +251,138 @@ class TransferClient(
         crypto: TransferCrypto?,
         isCancelled: () -> Boolean,
         onFileProgress: (fileId: String, bytesSent: Long, sizeBytes: Long, bytesPerSecond: Long) -> Unit,
+        partial: PartialStatus? = null,
     ): FileOutcome {
-        val opened = openPayload(file)
+        val opened = payloadSource.open(file)
             ?: return FileOutcome(file.id, false, 0L, "Cannot open ${file.name}")
         val (stream, sizeBytes) = opened
-        val socket = connect(peer)
-
-        val sessionKeys = crypto?.sessionKeys()
-        val wireLength = if (sessionKeys != null) SecureFrames.ciphertextLength(sizeBytes) else sizeBytes
-
-        return socket.use outer@{ connection ->
-            connection.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
-            val output = connection.getOutputStream()
-            output.writeRequestHead(
-                method = "PUT",
-                path = TransferProtocol.uploadPath(batchId, file.id),
-                contentLength = wireLength,
-                headers = buildMap {
-                    put(TransferProtocol.HEADER_FILE_NAME, URLEncoder.encode(file.name, "UTF-8"))
-                    put(TransferProtocol.HEADER_BATCH_ID, batchId)
-                    put("Content-Type", file.mimeType ?: Http.CONTENT_TYPE_OCTET)
-                    if (sessionKeys != null) {
-                        put(TransferProtocol.HEADER_ENCRYPTION, sessionKeys.cipherSuite)
-                    }
-                },
-            )
-
-            var sent = 0L
-            var cancelled = false
-
-            // One place measures the rate, whichever path below is moving the bytes, so the
-            // UI sees the same numbers for encrypted and plaintext transfers.
-            var lastReportAt = System.currentTimeMillis()
-            var lastReportBytes = 0L
-            var bytesPerSecond = 0L
-
-            fun report(sentNow: Long) {
-                val now = System.currentTimeMillis()
-                val elapsed = now - lastReportAt
-                if (elapsed < PROGRESS_REPORT_MS) return
-                val delta = sentNow - lastReportBytes
-                val instant = (delta * 1000L) / elapsed
-                bytesPerSecond = if (bytesPerSecond == 0L) instant else (bytesPerSecond / 2) + (instant / 2)
-                lastReportAt = now
-                lastReportBytes = sentNow
-                onFileProgress(file.id, sentNow, sizeBytes, bytesPerSecond)
-            }
-
-            val digest = MessageDigest.getInstance(StreamingDigest.ALGORITHM)
-
-            stream.use inner@{ input ->
-                val raw =
-                    input as? BufferedInputStream ?: BufferedInputStream(input, TransferProtocol.CHUNK_BYTES)
-                // Hashing the plaintext, so the digest means the same thing on both sides
-                // whether or not this session is encrypted. DigestInputStream is a bare
-                // pass-through, so it is buffered again for the streaming readers below,
-                // which want a source they can pull fixed-size reads out of.
-                val buffered = BufferedInputStream(
-                    DigestInputStream(raw, digest),
-                    TransferProtocol.CHUNK_BYTES,
-                )
-                if (sessionKeys != null) {
-                    SecureFrames.encryptStream(
-                        key = sessionKeys.sendKey,
-                        salt = sessionKeys.nonceSalt,
-                        source = buffered,
-                        plaintextLength = sizeBytes,
-                        sink = output,
-                    ) { plaintextBytes ->
-                        sent = plaintextBytes
-                        report(sent)
-                        if (isCancelled()) cancelled = true
-                    }
-                } else {
-                    val buffer = ByteArray(TransferProtocol.CHUNK_BYTES)
-                    while (!cancelled) {
-                        val read = buffered.read(buffer)
-                        if (read == -1) break
-                        output.write(buffer, 0, read)
-                        sent += read
-                        report(sent)
-                        if (isCancelled()) cancelled = true
-                    }
+        val digest = MessageDigest.getInstance(StreamingDigest.ALGORITHM)
+        val buffered = BufferedInputStream(DigestInputStream(stream, digest), TransferProtocol.CHUNK_BYTES)
+        val offset = partial?.bytes?.takeIf { it in 1..sizeBytes } ?: 0L
+        if (offset > 0) {
+            val prefix = try {
+                PartialFile.digestPrefix(buffered, offset) {
+                    if (isCancelled()) throw java.io.InterruptedIOException("Cancelled")
                 }
-                output.flush()
+            } catch (error: Throwable) {
+                buffered.close()
+                throw error
             }
-
-            onFileProgress(file.id, sent, sizeBytes, bytesPerSecond)
-            if (cancelled) {
-                return@outer FileOutcome(file.id, false, sent, "Cancelled")
+            if (!prefix.equals(partial?.digest, true)) {
+                buffered.close()
+                // Source changed since the interrupted attempt. Never append mismatched bytes.
+                return uploadFile(peer, batchId, file, crypto, isCancelled, onFileProgress)
             }
+        }
+        if (isCancelled()) {
+            buffered.close()
+            throw java.io.InterruptedIOException("Cancelled")
+        }
+        val socket = try { connect(peer, batchId) } catch (error: Throwable) {
+            stream.close()
+            throw error
+        }
 
-            val response = BufferedInputStream(connection.getInputStream()).readResponse()
-            if (!response.isSuccessful) {
-                return@outer FileOutcome(
-                    file.id,
-                    false,
-                    sent,
-                    ControlMessages.errorMessage(response.bodyText())
-                        ?: "Receiver error (HTTP ${response.status})",
+        try {
+            val sessionKeys = crypto?.sessionKeys()
+            val wireLength = if (sessionKeys != null) SecureFrames.ciphertextLength(sizeBytes - offset) else sizeBytes - offset
+
+            return socket.use outer@{ connection ->
+                connection.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
+                val output = connection.getOutputStream()
+                output.writeRequestHead(
+                    method = "PUT",
+                    path = TransferProtocol.uploadPath(batchId, file.id),
+                    contentLength = wireLength,
+                    headers = buildMap {
+                        put(TransferProtocol.HEADER_FILE_NAME, URLEncoder.encode(file.name, "UTF-8"))
+                        put(TransferProtocol.HEADER_BATCH_ID, batchId)
+                        put(TransferProtocol.HEADER_PLAIN_SIZE, sizeBytes.toString())
+                        if (offset > 0) {
+                            put(TransferProtocol.HEADER_RANGE, HttpRanges.header(offset))
+                            put(TransferProtocol.HEADER_PREFIX_DIGEST, requireNotNull(partial).digest)
+                        }
+                        put("Content-Type", file.mimeType ?: Http.CONTENT_TYPE_OCTET)
+                        if (sessionKeys != null) {
+                            put(TransferProtocol.HEADER_ENCRYPTION, sessionKeys.cipherSuite)
+                        }
+                    },
                 )
+
+                var sent = offset
+
+                // One place measures the rate, whichever path below is moving the bytes, so the
+                // UI sees the same numbers for encrypted and plaintext transfers.
+                var lastReportAt = System.currentTimeMillis()
+                var lastReportBytes = offset
+                var bytesPerSecond = 0L
+
+                fun report(sentNow: Long) {
+                    val now = System.currentTimeMillis()
+                    val elapsed = now - lastReportAt
+                    if (elapsed < PROGRESS_REPORT_MS) return
+                    val delta = sentNow - lastReportBytes
+                    val instant = (delta * 1000L) / elapsed
+                    bytesPerSecond = if (bytesPerSecond == 0L) instant else (bytesPerSecond / 2) + (instant / 2)
+                    lastReportAt = now
+                    lastReportBytes = sentNow
+                    onFileProgress(file.id, sentNow, sizeBytes, bytesPerSecond)
+                }
+
+                buffered.use {
+                    if (sessionKeys != null) {
+                        SecureFrames.encryptStream(
+                            key = sessionKeys.sendKey,
+                            salt = sessionKeys.nonceSalt,
+                            source = buffered,
+                            plaintextLength = sizeBytes - offset,
+                            sink = output,
+                        ) { plaintextBytes ->
+                            sent = offset + plaintextBytes
+                            report(sent)
+                            if (isCancelled()) throw java.io.InterruptedIOException("Cancelled")
+                        }
+                    } else {
+                        val buffer = ByteArray(TransferProtocol.CHUNK_BYTES)
+                        while (sent < sizeBytes) {
+                            if (isCancelled()) throw java.io.InterruptedIOException("Cancelled")
+                            val read = buffered.read(buffer, 0, minOf(buffer.size.toLong(), sizeBytes - sent).toInt())
+                            if (read == -1) throw java.io.EOFException("Source file was truncated")
+                            output.write(buffer, 0, read)
+                            sent += read
+                            report(sent)
+                            if (isCancelled()) throw java.io.InterruptedIOException("Cancelled")
+                        }
+                    }
+                    output.flush()
+                }
+
+                onFileProgress(file.id, sent, sizeBytes, bytesPerSecond)
+
+                val response = BufferedInputStream(connection.getInputStream()).readResponse()
+                if (!response.isSuccessful) {
+                    return@outer FileOutcome(
+                        file.id,
+                        false,
+                        sent,
+                        ControlMessages.errorMessage(response.bodyText())
+                            ?: "Receiver error (HTTP ${response.status})",
+                    )
+                }
+                // digest() resets the MessageDigest, so it is called exactly once.
+                val sentDigest = digest.digest().toHex()
+                val ack = ControlMessages.parseUploadAck(response.bodyText())
+                if (ack == null || ack.fileId != file.id || ack.totalOnDisk != sizeBytes) {
+                    return@outer FileOutcome(file.id, false, sent, "Invalid upload acknowledgement", sentDigest)
+                }
+                if (ack.digest != null && !ack.digest.equals(sentDigest, ignoreCase = true)) {
+                    return@outer FileOutcome(file.id, false, sent, "Integrity check failed: receiver digest differs", sentDigest)
+                }
+                FileOutcome(file.id, true, ack.totalOnDisk, null, sentDigest)
             }
-            // digest() resets the MessageDigest, so it is called exactly once.
-            val sentDigest = digest.digest().toHex()
-            val ack = ControlMessages.parseUploadAck(response.bodyText())
-            if (ack?.digest != null && !ack.digest.equals(sentDigest, ignoreCase = true)) {
-                MeshLog.w(TAG, "${file.name}: the receiver's digest does not match ours")
-            }
-            FileOutcome(file.id, true, ack?.bytes ?: sent, null, sentDigest)
+        } finally {
+            runCatching { buffered.close() }
+            runCatching { socket.close() }
         }
     }
 
@@ -346,7 +393,7 @@ class TransferClient(
     ): CompleteReport? {
         val body = with(ControlMessages) { CompleteRequest(batchId, files).toJson() }
             .toByteArray(StandardCharsets.UTF_8)
-        val socket = connect(peer)
+        val socket = connect(peer, batchId)
         return socket.use {
             it.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
             it.getOutputStream().writeRequest(
@@ -354,14 +401,15 @@ class TransferClient(
                 path = "${TransferProtocol.PATH_COMPLETE}?${TransferProtocol.QUERY_BATCH_ID}=$batchId",
                 body = body,
             )
-            val response = runCatching { BufferedInputStream(it.getInputStream()).readResponse() }.getOrNull()
-            response?.let { ControlMessages.parseCompleteReport(it.bodyText()) }
+            val response = BufferedInputStream(it.getInputStream()).readResponse()
+            check(response.isSuccessful) { "Receiver did not confirm completion (HTTP ${response.status})" }
+            ControlMessages.parseCompleteReport(response.bodyText())
         }
     }
 
     /** What the receiver already holds for [batchId]; null when it does not know the batch. */
     fun fetchStatus(peer: PeerDevice, batchId: String): BatchStatus? = runCatching {
-        val socket = connect(peer)
+        val socket = connect(peer, batchId)
         socket.use {
             it.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
             it.getOutputStream().writeRequest(
@@ -395,7 +443,8 @@ class TransferClient(
      * change until the read times out on its own. Closing the socket is what turns "wait two
      * minutes" into "fail over now".
      */
-    private val openSockets = ConcurrentHashMap<String, Socket>()
+    private val openSockets = ConcurrentHashMap<String, com.meshdrop.transfer.link.DuplexConnection>()
+    private val cancellationChecks = ConcurrentHashMap<String, () -> Boolean>()
 
     /** Closes the connection a batch is using. The in-flight upload fails; the caller decides what that means. */
     fun abort(batchId: String) {
@@ -405,43 +454,16 @@ class TransferClient(
         }
     }
 
-    private fun connect(peer: PeerDevice): Socket {
-        val socket = Socket()
-        socket.tcpNoDelay = true
-        socket.connect(InetSocketAddress(requireNotNull(peer.host), peer.port), TransferProtocol.CONNECT_TIMEOUT_MS)
-        socket.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
-        return socket
-    }
-
-    /**
-     * Opens the bytes to send. When the document provider did not report a size we spool the
-     * document to the cache first, because the protocol needs `Content-Length` up front.
-     */
-    private fun openPayload(file: TransferFile): Pair<InputStream, Long>? {
-        val uri = file.localUri?.let { Uri.parse(it) } ?: return null
-        if (file.sizeBytes > 0L) {
-            val stream = documentRepository.openInputStream(uri) ?: return null
-            return stream to file.sizeBytes
+    private fun connect(peer: PeerDevice, batchId: String? = null): com.meshdrop.transfer.link.DuplexConnection =
+        connectionFactory.open(peer) { connection ->
+            if (batchId != null) {
+                openSockets.put(batchId, connection)?.let { runCatching { it.close() } }
+                if (cancellationChecks[batchId]?.invoke() == true) {
+                    connection.close()
+                    throw java.io.InterruptedIOException("Cancelled")
+                }
+            }
         }
-        val original = documentRepository.openInputStream(uri) ?: return null
-        val spooled: File = fileSpooler.spool(uri, original, file.name) ?: return null
-        val stream = FileInputStream(spooled)
-        return RememberingStream(stream, spooled) to spooled.length()
-    }
-
-    /** Deletes the spooled copy once the upload is done. */
-    private inner class RememberingStream(
-        private val delegate: InputStream,
-        private val spooled: File,
-    ) : InputStream() {
-        override fun read(): Int = delegate.read()
-        override fun read(b: ByteArray, off: Int, len: Int): Int = delegate.read(b, off, len)
-        override fun available(): Int = delegate.available()
-        override fun close() {
-            runCatching { delegate.close() }
-            fileSpooler.delete(spooled)
-        }
-    }
 
     private fun readable(error: Throwable): String = when {
         error.message?.contains("ECONNREFUSED", ignoreCase = true) == true -> "The device is no longer reachable"

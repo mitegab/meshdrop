@@ -2,7 +2,6 @@ package com.meshdrop.data
 
 import android.content.ContentValues
 import android.content.Context
-import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -13,40 +12,21 @@ import java.io.FileOutputStream
 import java.io.OutputStream
 
 /**
- * A file we are writing into, plus the bookkeeping needed to publish (or discard) it.
- *
- * Modeled after `ContentResolver.openOutputStream` + `IS_PENDING`: a transfer writes into a
- * hidden row, and only when the last byte has landed does [finish] publish it to Downloads.
- */
-interface ReceivedFileSink {
-
-    val outputStream: OutputStream
-
-    /**
-     * The name the file actually landed under.
-     *
-     * Not necessarily the name the sender asked for: a name from the network is cleaned, and
-     * a name that already exists in Downloads gets a number. The screens show this one.
-     */
-    val displayName: String
-
-    /** Publishes the file and returns the Uri to show/open/share. */
-    fun finish(): Uri?
-
-    /** Discards a partially written file (transfer failed or was cancelled). */
-    fun abort()
-}
-
-/**
  * Writes incoming files into the public `Downloads/MeshDrop` folder.
  *
  *  * Android 10 (API 29)+ writes through MediaStore, so **no storage permission** is needed.
  *  * API 26–28 uses the legacy public Downloads directory, which needs
  *    `WRITE_EXTERNAL_STORAGE` (requested by the app only on those platforms).
  */
-class ReceivedFileStore(private val context: Context) {
+class ReceivedFileStore(private val context: Context) : IncomingFileStore {
 
     private val resolver get() = context.contentResolver
+
+    // Durable private bytes; a retry always re-approves and re-verifies their prefix.
+    override val partialDirectory = File(context.filesDir, "incoming").apply { mkdirs() }
+
+    override fun createPartial(): com.meshdrop.core.resume.PartialFile =
+        com.meshdrop.core.resume.PartialFile(partialDirectory)
 
     /**
      * Opens somewhere to write [requestedName].
@@ -55,7 +35,7 @@ class ReceivedFileStore(private val context: Context) {
      * near a path, and a name that already exists gets a number rather than replacing the
      * file that is already there.
      */
-    fun createSink(requestedName: String, mimeType: String?): ReceivedFileSink {
+    override fun createSink(requestedName: String, mimeType: String?): ReceivedFileSink {
         val cleaned = FileNames.clean(requestedName)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             createMediaStoreSink(cleaned, mimeType)
@@ -89,18 +69,17 @@ class ReceivedFileStore(private val context: Context) {
         return object : ReceivedFileSink {
             override val outputStream: OutputStream = stream
             override val displayName: String = landedName
-            override fun finish(): Uri? {
+            override fun finish(): String? {
                 stream.flushAndClose()
                 val published = ContentValues().apply {
                     put(MediaStore.Downloads.IS_PENDING, 0)
                 }
-                runCatching { resolver.update(uri, published, null, null) }
-                    .onFailure { MeshLog.w(TAG, "Could not publish $displayName", it) }
-                return uri
+                check(resolver.update(uri, published, null, null) > 0) { "Could not publish $displayName" }
+                return uri.toString()
             }
 
             override fun abort() {
-                stream.flushAndClose()
+                runCatching { stream.close() }
                 runCatching { resolver.delete(uri, null, null) }
             }
         }
@@ -123,18 +102,18 @@ class ReceivedFileStore(private val context: Context) {
         return object : ReceivedFileSink {
             override val outputStream: OutputStream = stream
             override val displayName: String = target.name
-            override fun finish(): Uri? {
+            override fun finish(): String? {
                 stream.flushAndClose()
                 return runCatching {
-                    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target)
+                    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target).toString()
                 }.getOrElse {
                     MeshLog.w(TAG, "FileProvider failed for $target", it)
-                    Uri.fromFile(target)
+                    null
                 }
             }
 
             override fun abort() {
-                stream.flushAndClose()
+                runCatching { stream.close() }
                 runCatching { target.delete() }
             }
         }
@@ -148,23 +127,22 @@ class ReceivedFileStore(private val context: Context) {
         return object : ReceivedFileSink {
             override val outputStream: OutputStream = stream
             override val displayName: String = target.name
-            override fun finish(): Uri? {
+            override fun finish(): String? {
                 stream.flushAndClose()
                 return runCatching {
-                    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target)
+                    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target).toString()
                 }.getOrNull()
             }
 
             override fun abort() {
-                stream.flushAndClose()
+                runCatching { stream.close() }
                 runCatching { target.delete() }
             }
         }
     }
 
     private fun OutputStream.flushAndClose() {
-        runCatching { flush() }
-        runCatching { close() }
+        try { flush() } finally { close() }
     }
 
     /**

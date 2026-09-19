@@ -34,6 +34,11 @@ interface IncomingTransferHandler {
     /** Key that decrypts incoming bytes for this batch, or null when plaintext. */
     fun sessionKeyFor(batchId: String): ByteArray?
 
+    /** Wait for the user's safety-code decision when the local policy requires it. */
+    val verificationRequired: Boolean get() = false
+
+    suspend fun awaitVerification(batchId: String): Boolean = true
+
     /** A file has been accepted and is being written to disk. */
     fun onFileStarted(batchId: String, fileId: String)
 

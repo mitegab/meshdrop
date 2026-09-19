@@ -3,9 +3,8 @@ package com.meshdrop.core.model
 /**
  * The pipe the bytes are currently travelling through.
  *
- * The MVP only ever uses [WIFI_LAN]; the others exist so the UI can already render
- * "this is the lane in use" and animate a failover the day Wi-Fi Direct, Bluetooth or relay
- * routing land. Every screen shares this vocabulary: one enum, one icon set, one colour.
+ * Direct IP, native byte streams and consented helper delivery share this vocabulary:
+ * one enum, one icon set, one colour. Discovery does not determine the payload lane.
  */
 enum class TransportLane(val label: String, val shortLabel: String) {
     WIFI_LAN("Wi-Fi LAN", "Wi-Fi"),
@@ -43,8 +42,8 @@ data class LaneActivity(
 /**
  * One peer's share of a batch (swarm mode).
  *
- * The MVP sends everything through a single peer, but the UI is built for several: the
- * active-transfer screen shows up to [MAX_VISIBLE] chips and folds the rest into "+n".
+ * Direct sends report the destination; swarm sends report actual helper assignments and
+ * destination-confirmed delivery. The UI shows up to [MAX_VISIBLE] contribution chips.
  */
 data class PeerContribution(
     val peerId: String,
@@ -70,5 +69,6 @@ enum class EndpointRole { SENDER, RECEIVER }
 fun DiscoveryKind.toLane(): TransportLane = when (this) {
     DiscoveryKind.WIFI_DIRECT -> TransportLane.WIFI_DIRECT
     DiscoveryKind.BLUETOOTH -> TransportLane.BLUETOOTH
+    DiscoveryKind.USB -> TransportLane.USB
     DiscoveryKind.LAN_NSD, DiscoveryKind.LAN_BEACON -> TransportLane.WIFI_LAN
 }

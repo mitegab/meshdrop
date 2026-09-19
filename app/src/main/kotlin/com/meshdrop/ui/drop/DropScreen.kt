@@ -109,6 +109,7 @@ fun DropScreen(
     missingPermissions: List<String> = emptyList(),
     onRequestPermissions: () -> Unit = {},
 ) {
+    val relayOffers by viewModel.relayOffers.collectAsStateWithLifecycle()
     val colors = MeshTheme.colors
     val context = LocalContext.current
 
@@ -217,6 +218,36 @@ fun DropScreen(
                             )
                         }
                     }
+                }
+
+                items(items = relayOffers, key = { "relay-${it.id}" }) { offer ->
+                    Gutter { Column {
+                        Text("Help a transfer?", style = MaterialTheme.typography.titleMedium)
+                        Text("${offer.senderFingerprint} → ${offer.nextPeer} → ${offer.destinationId}\nUp to ${offer.bytes / (1024 * 1024)} MiB for 30 minutes. Encrypted chunks only.")
+                        Row {
+                            androidx.compose.material3.TextButton(onClick = { viewModel.decideRelay(offer.id, true) }) { Text("Allow this route") }
+                            androidx.compose.material3.TextButton(onClick = { viewModel.decideRelay(offer.id, false) }) { Text("Decline") }
+                        }
+                    } }
+                }
+                item(key = "delivery-route") {
+                    Gutter { Column {
+                        Text("Delivery", style = MaterialTheme.typography.titleSmall)
+                        Row { listOf("direct" to "Direct", "swarm" to "Swarm", "relay" to "Relay chain").forEach { (mode, label) ->
+                            androidx.compose.material3.TextButton(onClick = { viewModel.helperMode(mode) }) { Text(if (ui.helperMode == mode) "✓ $label" else label) }
+                        } }
+                        if (ui.helperMode != "direct") {
+                            Text("Pair with the final destination first. Helpers must enable Helper mode and approve each route.")
+                            Text(if (ui.helperMode == "swarm") "Select independent chunk sources:" else "Tap helpers in route order (up to 3):")
+                            peers.filter { it.id != ui.peer?.id }.forEach { helper ->
+                                androidx.compose.material3.TextButton(onClick = { viewModel.toggleHelper(helper.id) }) {
+                                    val index = ui.helpers.indexOf(helper.id)
+                                    Text((if (index >= 0) "${index + 1}. " else "+ ") + helper.name)
+                                }
+                            }
+                            Text("Final destination: ${ui.peer?.name ?: "choose below"}")
+                        }
+                    } }
                 }
 
                 item(key = "tray") {
@@ -689,9 +720,10 @@ private fun PersonRow(
 }
 
 private fun caption(peer: PeerDevice, latencyMillis: Long?): String {
-    if (!peer.isReachable()) return "${peer.kind.label} · finding an address"
+    if (!peer.isReachable()) return if (peer.kind == com.meshdrop.core.model.DiscoveryKind.WIFI_DIRECT)
+        "Wi-Fi Direct · tap to connect" else "${peer.kind.label} · finding an address"
     val latency = latencyMillis?.let { "$it ms" }
-    return listOfNotNull(peer.kind.label, latency, "tap to send").joinToString(" · ")
+    return listOfNotNull(peer.transferLane.shortLabel, latency, "tap to send").joinToString(" · ")
 }
 
 /** One finished transfer, on its way to the full Activity feed. */
@@ -794,14 +826,14 @@ private fun PermissionNote(onRequest: () -> Unit) {
             Spacer(modifier = Modifier.width(Space.md))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "MeshDrop cannot see this network",
+                    text = "Some optional access is off",
                     style = MaterialTheme.typography.titleMedium,
                     color = colors.ink,
                 )
                 Spacer(modifier = Modifier.height(Space.hair))
                 Text(
-                    text = "Android keeps nearby-device access behind a permission. Without it, " +
-                        "no phone can find this one, and this one cannot find anybody.",
+                    text = "Nearby-device access enables additional discovery methods; notifications show incoming offers. " +
+                        "LAN transfers can still work without these permissions.",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.inkMuted,
                 )

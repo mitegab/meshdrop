@@ -76,7 +76,7 @@ object TransferSessionMapper {
             // The live pipe first, then the ones we gave up on — the route line draws the
             // history, so a failover is visible rather than something only the log knows.
             lanes = LaneFailover.activities(lane, job.bytesPerSecond, job.previousLanes),
-            contributions = listOf(
+            contributions = job.contributions.ifEmpty { listOf(
                 PeerContribution(
                     peerId = job.peerId,
                     displayName = job.peerName,
@@ -85,7 +85,7 @@ object TransferSessionMapper {
                     bytesDelivered = job.bytesTransferred,
                     isActive = true,
                 ),
-            ),
+            ) },
             security = security,
             justFailedOver = job.laneChangedAtMillis != null &&
                 nowMillis - job.laneChangedAtMillis <= JUST_SWITCHED_WINDOW_MILLIS,

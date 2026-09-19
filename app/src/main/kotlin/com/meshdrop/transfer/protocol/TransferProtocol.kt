@@ -1,6 +1,6 @@
 package com.meshdrop.transfer.protocol
 
-import android.util.Base64
+import java.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -33,6 +33,7 @@ object TransferProtocol {
      */
     const val VERSION = ProtocolVersions.CURRENT
 
+    const val PATH_READY = "/meshdrop/ready"
     const val PATH_PING = "/meshdrop/ping"
     const val PATH_HANDSHAKE = "/meshdrop/handshake"
     const val PATH_UPLOAD = "/meshdrop/upload"
@@ -52,6 +53,8 @@ object TransferProtocol {
      * the sender at completion (what it read); the two are compared before a batch is called
      * finished.
      */
+    const val HEADER_PREFIX_DIGEST = "X-MeshDrop-Prefix-SHA256"
+    const val HEADER_PLAIN_SIZE = "X-MeshDrop-Size"
     const val HEADER_DIGEST = "X-MeshDrop-Digest"
     const val QUERY_BATCH_ID = "batchId"
 
@@ -103,6 +106,7 @@ data class HandshakeResponse(
     val message: String? = null,
     /** The receiver's half of the key exchange, echoed back when it accepted and can encrypt. */
     val security: SecurityOfferDto? = null,
+    val requiresVerification: Boolean = false,
 ) {
     enum class Decision { ACCEPTED, REJECTED, TIMEOUT, ERROR }
 
@@ -133,11 +137,15 @@ data class BatchStatus(
     /** File ids that landed complete, in the order they arrived. */
     val completedFileIds: List<String> = emptyList(),
     val bytesReceived: Long = 0L,
+    /** Only advertised by receivers that implement verified partial-file append. */
+    val partialFiles: Map<String, PartialStatus> = emptyMap(),
 ) {
     fun isComplete(fileId: String): Boolean = fileId in completedFileIds
 
     val isEmpty: Boolean get() = completedFileIds.isEmpty()
 }
+
+data class PartialStatus(val bytes: Long, val digest: String)
 
 /** One file's outcome, reported by the sender when the batch is finished. */
 data class CompleteFile(
@@ -267,14 +275,16 @@ object ControlMessages {
     fun parseHandshake(body: String): HandshakeRequest? = runCatching {
         val json = JSONObject(body)
         val batchId = json.optString(K_BATCH)
-        if (batchId.isBlank()) return null
+        if (!batchId.matches(Regex("[A-Za-z0-9_.-]{1,128}"))) return null
         val filesArray = json.optJSONArray(K_FILES) ?: return null
+        if (filesArray.length() !in 1..1024) return null
         val files = mutableListOf<FileMeta>()
         for (index in 0 until filesArray.length()) {
-            val entry = filesArray.optJSONObject(index) ?: continue
+            val entry = filesArray.optJSONObject(index) ?: return null
             val id = entry.optString(K_ID)
             val name = entry.optString(K_NAME)
-            if (id.isBlank() || name.isBlank()) continue
+            if (!id.matches(Regex("[A-Za-z0-9_.-]{1,128}")) || name.isBlank() || name.length > 255) return null
+            if (entry.optLong(K_SIZE, -1) < 0) return null
             files += FileMeta(
                 id = id,
                 name = name,
@@ -282,7 +292,10 @@ object ControlMessages {
                 mime = entry.optString(K_MIME).takeIf { it.isNotBlank() },
             )
         }
-        if (files.isEmpty()) return null
+        if (files.map { it.id }.distinct().size != files.size) return null
+        // Catch overflow before storage budgets or progress counters see the manifest.
+        files.fold(0L) { total, file -> Math.addExact(total, file.size) }
+        if (json.has(K_SECURITY) && parseSecurityOffer(json.optJSONObject(K_SECURITY)) == null) return null
         HandshakeRequest(
             version = json.optInt(K_VERSION, TransferProtocol.VERSION),
             batchId = batchId,
@@ -295,6 +308,7 @@ object ControlMessages {
 
     fun HandshakeResponse.toJson(): String = JSONObject()
         .put(K_STATUS, decision.name.lowercase())
+        .put("requiresVerification", requiresVerification)
         .put(K_MESSAGE, message ?: "")
         .apply { security?.let { put(K_SECURITY, it.toJsonObject()) } }
         .toString()
@@ -308,6 +322,7 @@ object ControlMessages {
             decision = decision,
             message = json.optString(K_MESSAGE).takeIf { it.isNotBlank() },
             security = parseSecurityOffer(json.optJSONObject(K_SECURITY)),
+            requiresVerification = json.optBoolean("requiresVerification", false),
         )
     }.getOrNull()
 
@@ -374,6 +389,11 @@ object ControlMessages {
         .put(K_BATCH, batchId)
         .put(K_BYTES, bytesReceived)
         .put(K_COMPLETED, JSONArray().apply { completedFileIds.forEach { put(it) } })
+        .put("partials", JSONObject().apply {
+            partialFiles.forEach { (id, part) ->
+                put(id, JSONObject().put(K_BYTES, part.bytes).put(K_SHA256, part.digest))
+            }
+        })
         .toString()
 
     fun parseBatchStatus(body: String): BatchStatus? = runCatching {
@@ -387,6 +407,17 @@ object ControlMessages {
             batchId = json.optString(K_BATCH),
             completedFileIds = completed,
             bytesReceived = json.optLong(K_BYTES, 0L),
+            partialFiles = buildMap {
+                val partials = json.optJSONObject("partials")
+                partials?.keys()?.forEach { id ->
+                    val part = partials.optJSONObject(id)
+                    val bytes = part?.optLong(K_BYTES, -1) ?: -1
+                    val digest = part?.optString(K_SHA256).orEmpty()
+                    if (bytes > 0 && digest.matches(Regex("[a-fA-F0-9]{64}"))) {
+                        put(id, PartialStatus(bytes, digest))
+                    }
+                }
+            },
         )
     }.getOrNull()
 
@@ -410,7 +441,7 @@ object ControlMessages {
         )
     }.getOrNull()
 
-    private fun ByteArray.base64(): String = Base64.encodeToString(this, Base64.NO_WRAP)
+    private fun ByteArray.base64(): String = Base64.getEncoder().encodeToString(this)
 
-    private fun String.decodeBase64(): ByteArray = Base64.decode(this, Base64.DEFAULT)
+    private fun String.decodeBase64(): ByteArray = Base64.getDecoder().decode(this)
 }
