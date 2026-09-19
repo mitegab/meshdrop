@@ -18,14 +18,14 @@ class MeshService(val receiver: MeshReceiver, val relay: RelayService) {
         if (head.method != "POST" || !head.hasContentLength || head.contentLength !in 2..MeshRpc.MAX_BYTES.toLong()) {
             output.writeError(400, "Bad Request", "Expected a bounded mesh JSON request"); return true
         }
-        // Don't hold the admission semaphore while awaiting user consent: the other phone
-        // must remain able to ask for an identity or complete another operation.
-        val body = slots.withPermit { JSONObject(input.readExactly(head.contentLength).toString(Charsets.UTF_8)) }
+        slots.withPermit {
+        val body = JSONObject(input.readExactly(head.contentLength).toString(Charsets.UTF_8))
         try {
             val result = if (head.path.startsWith(MeshRpc.RELAY)) relay.handle(head.path.removePrefix(MeshRpc.RELAY), body)
                 else receiver.handle(head.path.removePrefix(MeshRpc.PREFIX), body)
             output.writeJson(200, "OK", result.toString())
         } catch (error: Exception) { output.writeError(403, "Forbidden", error.message ?: "Mesh request rejected") }
+        }
         return true
     }
     fun stop() { receiver.stop(); relay.revokeAll() }

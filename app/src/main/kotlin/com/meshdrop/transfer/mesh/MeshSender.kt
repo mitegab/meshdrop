@@ -43,20 +43,36 @@ class MeshSender(
         require(helperRoutes.size in 1..4)
         val root = File(cache, AtomicJson.digest(batchId.toByteArray())).apply { mkdirs() }
         val rpc = MeshRpc(connections)
-        val watcher = launch { while (isActive) { delay(100); if (isCancelled()) { rpc.close(); return@launch } } }
+        val watcher = launch(Dispatchers.Default) { while (isActive) { delay(100); if (isCancelled()) { rpc.close(); return@launch } } }
         try {
-            val estimated = files.sumOf { it.sizeBytes.coerceAtLeast(0) }
-            val routes = helperRoutes.map { helpers ->
+            val manifestStore = AtomicJson(File(root, "manifest.json"))
+            val saved = manifestStore.read()
+            check(saved != null || !File(root, "manifest.json").exists()) { "Cached manifest is corrupt; pick the files again" }
+            val prepared = if (saved == null) files.map { prepare(root, it, isCancelled) } else null
+            val estimated = prepared?.sumOf { it.size } ?: MeshManifest.parse(requireNotNull(saved)).totalBytes
+            val approved = helperRoutes.mapNotNull { helpers ->
                 require(helpers.isNotEmpty() && helpers.size <= 3 && peer.id !in helpers && senderId !in helpers)
                 val first = peers().firstOrNull { it.id == helpers.first() && it.isReachable() } ?: error("Reconnect the first helper")
                 // Includes framing, base64, offers, receipts and retried control traffic.
-                RelayRoute.approve(rpc, identity, first, helpers + peer.id, maxOf(16 * 1024 * 1024L, estimated * 2 + 4 * 1024 * 1024L))
+                runCatching { helpers to RelayRoute.approve(rpc, identity, first, helpers + peer.id,
+                    maxOf(16 * 1024 * 1024L, estimated * 2 + 4 * 1024 * 1024L)) }.getOrNull()
             }
-            val remote = SignedJson.verify(routes.first().call(MeshRpc.PREFIX + "identity", JSONObject()))
-            require(remote.payload.getString("deviceId") == peer.id) { "The route ended at another device" }
-            check(trusted.isVerified(remote.fullFingerprint)) { "Pair with the final destination before using helpers (${remote.fingerprint})" }
-            val manifestStore = AtomicJson(File(root, "manifest.json"))
-            val saved = manifestStore.read()
+            check(approved.isNotEmpty()) { "No helper route was approved and reachable" }
+            val routes = approved.map { it.second }
+            val activeHelpers = approved.map { it.first }
+            fun call(path: String, body: JSONObject, key: ByteArray? = null): SignedJson.Verified {
+                var failure: Exception? = null
+                routes.forEach { route -> try {
+                    val reply = SignedJson.verify(route.call(MeshRpc.PREFIX + path, body), key)
+                    if (path == "identity") {
+                        require(reply.payload.getString("deviceId") == peer.id) { "The route ended at another device" }
+                        check(trusted.isVerified(reply.fullFingerprint)) { "Pair with the final destination using a current full-fingerprint code (${reply.fingerprint})" }
+                    }
+                    return reply
+                } catch (error: Exception) { failure = error } }
+                throw failure ?: IOException("No destination route")
+            }
+            val remote = call("identity", JSONObject())
             val manifest = if (saved != null) {
                 MeshManifest.parse(saved).also {
                     require(it.destination == remote.fullFingerprint && it.senderId == senderId)
@@ -69,14 +85,14 @@ class MeshSender(
                     }
                 }
             } else {
-                val prepared = files.map { f -> prepare(root, f, isCancelled) }
+                val prepared = requireNotNull(prepared)
                 require(prepared.sumOf { it.chunks.size } <= MeshManifest.MAX_CHUNKS) { "Mesh batch exceeds the chunk budget" }
                 MeshManifest(batchId, senderId, senderName, remote.fullFingerprint, System.currentTimeMillis() + 24 * 60 * 60_000L, prepared)
                     .also { manifestStore.write(it.toJson()) }
             }
             val offer = JSONObject().put("manifest", SignedJson.sign(manifest.toJson(), identity))
                 .put("security", with(ControlMessages) { requireNotNull(crypto.localMaterial()).toDto().toJsonObject() })
-            val answer = SignedJson.verify(routes.first().call(MeshRpc.PREFIX + "offer", offer), remote.publicKey).payload
+            val answer = call("offer", offer, remote.publicKey).payload
             require(answer.getString("manifest") == manifest.hash && answer.getBoolean("accepted"))
             val keys = crypto.establish(ControlMessages.parseSecurityOffer(answer.getJSONObject("security"))?.toOffer())
                 ?: error("The destination did not establish encryption")
@@ -84,7 +100,7 @@ class MeshSender(
             onSecurity()
             val token = answer.getString("token")
             fun control() = JSONObject().put("batchId", batchId).put("token", token)
-            val status = SignedJson.verify(routes.first().call(MeshRpc.PREFIX + "status", control()), remote.publicKey).payload
+            val status = call("status", control(), remote.publicKey).payload
             require(status.getString("manifest") == manifest.hash)
             val inventory = status.getJSONObject("files")
             val all = mutableListOf<Assignment>()
@@ -98,7 +114,7 @@ class MeshSender(
                 delivered[item.file.id] = (delivered[item.file.id] ?: 0) + item.bytes
                 helperBytes[item.route] += item.bytes
                 onProgress(item.file.id, delivered[item.file.id] ?: 0, item.file.size, routes.indices.map { index ->
-                    val id = helperRoutes[index].first()
+                    val id = activeHelpers[index].first()
                     PeerContribution(id, peers().firstOrNull { it.id == id }?.name ?: id, TransportLane.RELAY,
                         all.filter { it.route == index }.sumOf { it.bytes }, helperBytes[index], true)
                 })
@@ -137,7 +153,7 @@ class MeshSender(
                 }
                 check(accepted) { "Every helper route failed: ${failure?.message}" }
             } } }.awaitAll()
-            val completed = SignedJson.verify(routes.first().call(MeshRpc.PREFIX + "complete", control()), remote.publicKey).payload
+            val completed = call("complete", control(), remote.publicKey).payload
             require(completed.getString("manifest") == manifest.hash && completed.getBoolean("complete"))
             val receipts = completed.getJSONObject("files")
             val outcomes = manifest.files.map { f ->

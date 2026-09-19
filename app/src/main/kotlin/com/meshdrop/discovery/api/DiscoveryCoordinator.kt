@@ -88,7 +88,10 @@ class DiscoveryCoordinator(
     /** Per-strategy detail, so the UI can explain why a transport found nothing. */
     val strategyStatuses: StateFlow<Map<DiscoveryKind, StrategyStatus>> =
         combine(strategies.map { it.status }) { statuses: Array<StrategyStatus> ->
-            strategies.mapIndexed { index, strategy -> strategy.kind to statuses[index] }.toMap()
+            strategies.mapIndexed { index, strategy -> strategy.kind to statuses[index] }.groupBy({ it.first }, { it.second })
+                .mapValues { (_, entries) -> StrategyStatus(entries.any { it.advertising }, entries.any { it.scanning },
+                    entries.mapNotNull { it.note }.distinct().joinToString(" · ").ifBlank { null },
+                    entries.mapNotNull { it.error }.distinct().joinToString(" · ").ifBlank { null }) }
         }.stateIn(scope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     init {

@@ -103,14 +103,14 @@ object Http {
     }
 
     @Throws(IOException::class)
-    fun BufferedInputStream.readResponse(): Response {
+    fun BufferedInputStream.readResponse(maxBodyBytes: Long = 256 * 1024L): Response {
         val statusLine = readLineCrlf() ?: throw IOException("Connection closed before response")
         val parts = statusLine.split(' ', limit = 3)
         if (parts.size < 2) throw IOException("Malformed status line: $statusLine")
         val status = parts[1].toIntOrNull() ?: throw IOException("Malformed status code: $statusLine")
         val headers = readHeaders()
         val length = headers["content-length"]?.toLongOrNull()
-        if (length == null || length !in 0..(256 * 1024L)) throw IOException("Invalid control response length")
+        if (length == null || length !in 0..maxBodyBytes) throw IOException("Invalid control response length")
         val body = readExactly(length)
         return Response(status, parts.getOrNull(2).orEmpty(), headers, body)
     }

@@ -25,6 +25,9 @@ class FramedLink(
     private val closed = AtomicBoolean()
     private val writerLock = Any()
     private val ready = CountDownLatch(1)
+    private val controls = ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, ArrayBlockingQueue<Runnable>(MAX_CHANNELS),
+        ThreadFactory { Thread(it, "meshdrop-link-control").apply { isDaemon = true } },
+        RejectedExecutionHandler { _, _ -> close() })
 
     init {
         thread(name = "meshdrop-link", isDaemon = true) {
@@ -42,16 +45,18 @@ class FramedLink(
                     val body = ByteArray(size).also { source.readFully(it) }
                     when (type) {
                         OPEN -> {
-                            require(size == 0 && (id % 2 == 1) != initiator && !channels.containsKey(id))
-                            if (channels.size >= MAX_CHANNELS) { send(CLOSE, id); continue }
-                            val channel = Channel(id)
-                            channels[id] = channel
+                            require(size == 0 && (id % 2 == 1) != initiator)
+                            val channel = synchronized(channels) {
+                                require(!channels.containsKey(id))
+                                if (channels.size >= MAX_CHANNELS) null else Channel(id).also { channels[id] = it }
+                            }
+                            if (channel == null) { send(CLOSE, id); continue }
                             try { onIncoming(channel) } catch (error: Exception) { channel.close() }
                         }
                         DATA -> {
                             require(size > 0)
                             val channel = channels[id] ?: continue
-                            if (!channel.queue.offer(body)) throw IOException("Peer exceeded flow-control credit")
+                            if (channel.receiveCredits.getAndDecrement() <= 0 || !channel.queue.offer(body)) throw IOException("Peer exceeded flow-control credit")
                         }
                         CLOSE -> { require(size == 0); channels.remove(id)?.remoteClose() }
                         CREDIT -> {
@@ -84,13 +89,17 @@ class FramedLink(
 
     private fun send(type: Int, id: Int, body: ByteArray = EMPTY) = synchronized(writerLock) {
         if (closed.get()) throw IOException("Link disconnected")
-        val writer = DataOutputStream(output)
-        writer.writeByte(type); writer.writeInt(id); writer.writeInt(body.size); writer.write(body); writer.flush()
+        val deadline = WATCHDOG.schedule({ close() }, 30, TimeUnit.SECONDS)
+        try {
+            val writer = DataOutputStream(output)
+            writer.writeByte(type); writer.writeInt(id); writer.writeInt(body.size); writer.write(body); writer.flush()
+        } finally { deadline.cancel(false) }
     }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         ready.countDown()
+        controls.shutdownNow()
         runCatching { physical.close() }
         channels.values.forEach { it.remoteClose() }
         channels.clear()
@@ -100,6 +109,7 @@ class FramedLink(
     private inner class Channel(val id: Int) : DuplexConnection {
         val queue = ArrayBlockingQueue<ByteArray>(WINDOW + 1)
         val credits = Semaphore(WINDOW)
+        val receiveCredits = AtomicInteger(WINDOW)
         private val ended = AtomicBoolean()
         private var current = EMPTY
         private var cursor = 0
@@ -114,7 +124,12 @@ class FramedLink(
                 require(off >= 0 && len >= 0 && off <= b.size - len)
                 if (len == 0) return 0
                 while (cursor == current.size) {
-                    if (current.isNotEmpty() && !ended.get()) runCatching { send(CREDIT, id) }
+                    if (current.isNotEmpty() && !ended.get()) {
+                        current = EMPTY
+                        cursor = 0
+                        receiveCredits.incrementAndGet()
+                        send(CREDIT, id)
+                    }
                     if (ended.get() && queue.isEmpty()) return -1
                     current = queue.poll(soTimeout.toLong(), TimeUnit.MILLISECONDS)
                         ?: throw java.net.SocketTimeoutException("Link read timed out")
@@ -154,9 +169,10 @@ class FramedLink(
         override fun close() {
             if (!ended.getAndSet(true)) {
                 channels.remove(id)
-                runCatching { send(CLOSE, id) }
                 queue.offer(EMPTY)
                 credits.release(WINDOW)
+                // Cancellation must not wait for another stream's blocked physical write.
+                controls.execute { runCatching { send(CLOSE, id) } }
             }
         }
     }
@@ -169,6 +185,9 @@ class FramedLink(
         private const val DATA = 2
         private const val CLOSE = 3
         private const val CREDIT = 4
+        private val WATCHDOG = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "meshdrop-link-watchdog").apply { isDaemon = true }
+        }
         private val EMPTY = ByteArray(0)
         private val PREFACE = "MESHDROP-LINK/1\n".toByteArray(Charsets.US_ASCII)
     }

@@ -10,7 +10,7 @@ sourceSets {
         kotlin.srcDir("../app/src/main/kotlin")
         kotlin.include("com/meshdrop/cli/**", "com/meshdrop/core/model/**", "com/meshdrop/core/integrity/**",
             "com/meshdrop/core/resume/**", "com/meshdrop/core/persistence/**", "com/meshdrop/core/security/**",
-            "com/meshdrop/core/pairing/**", "com/meshdrop/core/util/Log.kt", "com/meshdrop/data/IncomingFileStore.kt",
+            "com/meshdrop/core/pairing/**", "com/meshdrop/core/util/**", "com/meshdrop/data/IncomingFileStore.kt",
             "com/meshdrop/transfer/crypto/**", "com/meshdrop/transfer/protocol/**", "com/meshdrop/transfer/server/**",
             "com/meshdrop/transfer/mesh/**", "com/meshdrop/transfer/link/DuplexConnection.kt",
             "com/meshdrop/transfer/link/FramedLink.kt", "com/meshdrop/transfer/client/PayloadSource.kt",

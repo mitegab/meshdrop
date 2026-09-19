@@ -223,9 +223,15 @@ class TransferServer(
             return
         }
         try {
+            val owner = request.security?.let { security ->
+                val derived = com.meshdrop.transfer.crypto.IdentityVerifier.fingerprintOf(security.identityPublicKey)
+                if (derived.equals(security.fingerprint, true) && com.meshdrop.transfer.crypto.IdentityVerifier.verify(
+                        security.identityPublicKey, security.ephemeralPublicKey, security.signature))
+                    com.meshdrop.core.persistence.AtomicJson.digest(security.identityPublicKey) else null
+            }
             val previous = batches[request.batchId] ?: restore(request.batchId)
             if (previous != null && (previous.request.senderId != request.senderId ||
-                    previous.fingerprint != request.security?.fingerprint ||
+                    previous.fingerprint != owner ||
                     previous.request.files.map { listOf(it.id, it.name, it.sizeBytes, it.mimeType) } !=
                     request.files.map { listOf(it.id, it.name, it.size, it.mime) } ||
                     previous.writing.isNotEmpty())) {
@@ -262,7 +268,7 @@ class TransferServer(
             when (accepted) {
                 true -> {
                     if (!isRunning) return
-                    val acceptedBatch = previous ?: BatchState(incoming, request.security?.fingerprint)
+                    val acceptedBatch = previous ?: BatchState(incoming, owner)
                     batches[request.batchId] = acceptedBatch
                     checkpoint(acceptedBatch)
                     acceptedBatch.receipts.forEach { (id, receipt) -> handler.onFileCompleted(request.batchId, id, receipt.first, receipt.second) }
@@ -509,7 +515,7 @@ class TransferServer(
     private fun DuplexConnection.closeQuietly() = runCatching { close() }
 
     private fun checkpoint(batch: BatchState) {
-        if (batch.cancelled || journal == null) return
+        if (batch.cancelled || journal == null || batch.fingerprint == null) return
         synchronized(batch) {
             val json = org.json.JSONObject().put("senderId", batch.request.senderId).put("senderName", batch.request.senderName)
                 .put("fingerprint", batch.fingerprint ?: "").put("files", com.meshdrop.core.persistence.JournalCodec.files(batch.request.files))

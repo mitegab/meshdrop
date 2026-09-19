@@ -15,16 +15,17 @@ import java.util.UUID
 class MeshRpc(private val connections: ConnectionFactory = ConnectionFactory.TCP) : java.io.Closeable {
     private val active = java.util.concurrent.ConcurrentHashMap.newKeySet<com.meshdrop.transfer.link.DuplexConnection>()
     @Volatile private var closed = false
-    override fun close() { closed = true; active.forEach { runCatching { it.close() } }; active.clear() }
-    fun call(peer: PeerDevice, path: String, body: JSONObject = JSONObject()): JSONObject {
+    fun abortActive() { active.forEach { runCatching { it.close() } }; active.clear() }
+    override fun close() { closed = true; abortActive() }
+    fun call(peer: PeerDevice, path: String, body: JSONObject = JSONObject(), authorize: () -> Boolean = { true }): JSONObject {
         check(!closed) { "Request cancelled" }
-        val connection = connections.open(peer) { active.add(it); if (closed) { it.close(); error("Request cancelled") } }
+        val connection = connections.open(peer) { active.add(it); if (closed || !authorize()) { it.close(); error("Request cancelled") } }
         try { return connection.use {
             it.soTimeout = 125_000
             val bytes = body.toString().toByteArray()
             require(bytes.size <= MAX_BYTES) { "Mesh request exceeds its quota" }
             it.getOutputStream().writeRequest("POST", path, bytes)
-            val response = BufferedInputStream(it.getInputStream()).readResponse()
+            val response = BufferedInputStream(it.getInputStream()).readResponse(MAX_BYTES.toLong())
             check(response.isSuccessful) { "${peer.name}: ${response.bodyText().take(256)} (HTTP ${response.status})" }
             JSONObject(response.bodyText())
         } } finally { active.remove(connection) }

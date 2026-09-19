@@ -25,7 +25,7 @@ class RelayService(
     private val enabled: () -> Boolean,
     private val maxQuota: Long = 1024L * 1024 * 1024,
 ) {
-    private data class Grant(val owner: String, val route: List<String>, val position: Int, val expires: Long, var remaining: Long)
+    private data class Grant(val owner: String, val route: List<String>, val position: Int, val expires: Long, var remaining: Long, @Volatile var revoked: Boolean = false)
     private data class Staged(val grant: String, val file: File, val hash: String)
     private val grants = ConcurrentHashMap<String, Grant>()
     private val pending = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
@@ -37,7 +37,7 @@ class RelayService(
     init { directory.mkdirs(); directory.listFiles()?.forEach { it.delete() } } // grants never survive process death
 
     fun decide(id: String, accept: Boolean) { pending[id]?.complete(accept) }
-    fun revokeAll() { grants.clear(); pending.values.forEach { it.complete(false) }; staged.values.forEach { it.file.delete() }; staged.clear() }
+    fun revokeAll() { grants.values.forEach { it.revoked = true }; rpc.abortActive(); grants.clear(); pending.values.forEach { it.complete(false) }; staged.values.forEach { it.file.delete() }; staged.clear() }
 
     private fun verified(envelope: JSONObject): SignedJson.Verified {
         check(enabled()) { "Helper mode is off" }
@@ -62,6 +62,9 @@ class RelayService(
         val body = sender.payload
         val now = System.currentTimeMillis()
         grants.entries.removeAll { it.value.expires < now }
+        staged.entries.removeAll { (_, item) ->
+            if (!grants.containsKey(item.grant)) { item.file.delete(); true } else false
+        }
         consumed.entries.removeAll { it.value < now - 30 * 60_000L }
         require(consumed.size < 32768) { "Relay request budget exhausted" }
         if (operation == "offer") {
@@ -85,8 +88,10 @@ class RelayService(
         val grant = grants[token] ?: error("Relay permission expired or revoked")
         require(grant.owner == sender.fullFingerprint) { "Permission belongs to another sender" }
         if (operation == "dispatch") {
-            val item = staged.remove(body.getString("staged")) ?: error("No staged assignment")
+            val stagedId = body.getString("staged")
+            val item = staged[stagedId] ?: error("No staged assignment")
             require(item.grant == token)
+            require(staged.remove(stagedId, item)) { "Assignment is already being dispatched" }
             try {
                 require(item.file.length() <= MeshRpc.MAX_BYTES)
                 val text = item.file.readText()
@@ -107,10 +112,12 @@ class RelayService(
             grant.remaining -= bytes.size
         }
         if (operation == "stage") {
-            require(staged.size < 16 && staged.values.sumOf { it.file.length() } + bytes.size <= 32 * 1024 * 1024L) { "Relay cache is full" }
-            val file = File.createTempFile("assignment-", ".json", directory)
-            file.outputStream().use { it.write(bytes) }
-            staged[id] = Staged(token, file, AtomicJson.digest(bytes))
+            synchronized(staged) {
+                require(staged.size < 16 && staged.values.sumOf { it.file.length() } + bytes.size <= 32 * 1024 * 1024L) { "Relay cache is full" }
+                val file = File.createTempFile("assignment-", ".json", directory)
+                file.outputStream().use { it.write(bytes) }
+                staged[id] = Staged(token, file, AtomicJson.digest(bytes))
+            }
             return JSONObject().put("id", id).put("stored", bytes.size)
         }
         return forward(grant, request)
@@ -128,7 +135,15 @@ class RelayService(
     }
 
     private suspend fun forward(grant: Grant, request: JSONObject): JSONObject = slots.withPermit {
-        check(enabled() && grant.expires >= System.currentTimeMillis()) { "Relay permission revoked" }
-        rpc.call(peer(grant.route[grant.position + 1]), request.getString("path"), request.getJSONObject("body"))
+        fun authorized() = enabled() && !grant.revoked && grant.expires >= System.currentTimeMillis()
+        check(authorized()) { "Relay permission revoked" }
+        // Reserve the maximum reply before forwarding, then refund the unused bytes. A tiny
+        // request must not be usable to evade the quota by generating large replies.
+        synchronized(grant) { require(grant.remaining >= MeshRpc.MAX_BYTES) { "Relay response quota exhausted" }; grant.remaining -= MeshRpc.MAX_BYTES }
+        var actual = MeshRpc.MAX_BYTES
+        try {
+            rpc.call(peer(grant.route[grant.position + 1]), request.getString("path"), request.getJSONObject("body"), ::authorized)
+                .also { actual = it.toString().toByteArray().size }
+        } finally { synchronized(grant) { grant.remaining += MeshRpc.MAX_BYTES - actual } }
     }
 }
