@@ -18,5 +18,6 @@ class BleEndpointTest {
         assertNull(BleEndpoint.decode(byteArrayOf(2, 1, 2, 3, 4, 1, 1)))
         assertNull(BleEndpoint.decode(byteArrayOf(1, 127, 0, 0, 1, 1, 1)))
         assertNull(BleEndpoint.decode(byteArrayOf(1, 10, 0, 0, 1, 0, 0)))
+        assertNull(BleEndpoint.decode(byteArrayOf(1, 8, 8, 8, 8, 1, 1)))
     }
 }
