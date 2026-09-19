@@ -21,6 +21,7 @@ import com.meshdrop.transfer.protocol.Http.writeError
 import com.meshdrop.transfer.protocol.Http.writeJson
 import com.meshdrop.transfer.protocol.TransferProtocol
 import com.meshdrop.transfer.protocol.UploadAck
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -93,11 +94,11 @@ class TransferServer(
         MeshLog.i(TAG, "Transfer server stopped")
     }
 
-    private suspend fun acceptLoop(socket: ServerSocket) {
-        while (scope.isActive && !socket.isClosed) {
+    private suspend fun acceptLoop(socket: ServerSocket) = coroutineScope {
+        while (isActive && !socket.isClosed) {
             val client = runCatching { socket.accept() }.getOrElse { error ->
                 if (!socket.isClosed) MeshLog.w(TAG, "accept() failed", error)
-                return
+                return@coroutineScope
             }
             if (connections.size >= 32 || socket.isClosed) {
                 client.closeQuietly()
@@ -106,7 +107,7 @@ class TransferServer(
             connections += client
             client.soTimeout = TransferProtocol.SOCKET_TIMEOUT_MS
             client.tcpNoDelay = true
-            scope.launch(Dispatchers.IO) { handleConnection(client) }
+            launch(Dispatchers.IO) { handleConnection(client) }
         }
     }
 
@@ -391,11 +392,11 @@ class TransferServer(
     ) {
         val batchId = head.query.substringAfter("${TransferProtocol.QUERY_BATCH_ID}=", "")
             .substringBefore('&')
-        val body = if (head.contentLength in 1..MAX_CONTROL_BYTES) {
-            runCatching { input.readExactly(head.contentLength).toString(Charsets.UTF_8) }.getOrDefault("")
-        } else {
-            ""
+        if (head.contentLength !in 0..MAX_CONTROL_BYTES) {
+            output.writeError(400, "Bad Request", "Invalid completion body length")
+            return
         }
+        val body = input.readExactly(head.contentLength).toString(Charsets.UTF_8)
         val report = ControlMessages.parseCompleteRequest(body, batchId)
         if (report == null || report.batchId != batchId) {
             output.writeError(400, "Bad Request", "Malformed completion report")
@@ -410,20 +411,19 @@ class TransferServer(
             output.writeError(409, "Conflict", "Batch is incomplete; retry missing files")
             return
         }
-        val received = batch?.completed?.size ?: 0
+        val received = batch.completed.size
 
-        val mismatched = report?.files
-            ?.filter { file -> file.digest != null }
-            ?.filterNot { file ->
-                val landed = batch?.digests?.get(file.fileId)
+        val mismatched = report.files
+            .filter { file -> file.digest != null }
+            .filterNot { file ->
+                val landed = batch.digests[file.fileId]
                 landed != null && landed.equals(file.digest, ignoreCase = true)
             }
-            ?.map { it.fileId }
-            ?: emptyList()
+            .map { it.fileId }
 
         val result = CompleteReport(
             filesLanded = received,
-            bytesWritten = batch?.bytesWritten ?: 0L,
+            bytesWritten = batch.bytesWritten,
             mismatchedFiles = mismatched,
         )
         if (result.integrityFailed) {

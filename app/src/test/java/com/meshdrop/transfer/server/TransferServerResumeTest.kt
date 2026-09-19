@@ -170,4 +170,26 @@ class TransferServerResumeTest {
         }
     }
 
+    @Test fun `stopping the receiver cancels pending approval coroutines`() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val cancelled = java.util.concurrent.CountDownLatch(1)
+        val handler = object : IncomingTransferHandler by Handler() {
+            override suspend fun requestApproval(request: IncomingRequest): Boolean {
+                entered.countDown()
+                try { awaitCancellation() } finally { cancelled.countDown() }
+            }
+        }
+        withServer(handler) { server, _ ->
+            Socket("127.0.0.1", server.port).use { socket ->
+                val offer = HandshakeRequest(batchId = "batch", senderId = "sender", senderName = "Sender",
+                    files = listOf(FileMeta("file", "photo.jpg", 1, null)))
+                socket.getOutputStream().writeRequest("POST", TransferProtocol.PATH_HANDSHAKE,
+                    with(ControlMessages) { offer.toJson() }.toByteArray())
+                assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                server.stop()
+                assertTrue(cancelled.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            }
+        }
+    }
+
 }

@@ -269,7 +269,9 @@ class TransferEngine(
     fun retry(jobId: String): Boolean {
         val job = _jobs.value.firstOrNull { it.id == jobId } ?: return false
         if (job.direction != TransferDirection.SEND || !job.status.isFinished) return false
-        val peer = batchPeers[jobId] ?: return false
+        val peer = alternativeRoutes(job.peerId).firstOrNull { it.isReachable() }
+            ?: batchPeers[jobId] ?: return false
+        batchPeers[jobId] = peer
         val missing = job.files.filter { it.status != TransferStatus.COMPLETED }
         if (missing.isEmpty() && job.status == TransferStatus.COMPLETED) return false
 

@@ -795,14 +795,14 @@ private fun PermissionNote(onRequest: () -> Unit) {
             Spacer(modifier = Modifier.width(Space.md))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "MeshDrop cannot see this network",
+                    text = "Some optional access is off",
                     style = MaterialTheme.typography.titleMedium,
                     color = colors.ink,
                 )
                 Spacer(modifier = Modifier.height(Space.hair))
                 Text(
-                    text = "Android keeps nearby-device access behind a permission. Without it, " +
-                        "no phone can find this one, and this one cannot find anybody.",
+                    text = "Nearby-device access enables additional discovery methods; notifications show incoming offers. " +
+                        "LAN transfers can still work without these permissions.",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.inkMuted,
                 )
