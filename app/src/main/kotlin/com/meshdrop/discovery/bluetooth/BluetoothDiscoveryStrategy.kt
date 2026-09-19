@@ -74,8 +74,8 @@ class BluetoothDiscoveryStrategy(context: Context, private val scope: CoroutineS
         val now = System.currentTimeMillis()
         synchronized(probes) {
             if (now - (probes[key] ?: 0L) < 10_000) return
-            if (probes.size >= 64 && key !in probes) probes.entries.removeAll { now - it.value > 30_000 }
-            if (probes.size >= 64 && key !in probes) return
+            if (probes.size >= 64 && !probes.containsKey(key)) probes.entries.removeAll { now - it.value > 30_000 }
+            if (probes.size >= 64 && !probes.containsKey(key)) return
             probes[key] = now
         }
         val scanGeneration = generation
@@ -91,7 +91,7 @@ class BluetoothDiscoveryStrategy(context: Context, private val scope: CoroutineS
                     val id = json.getString("deviceId")
                     require(id.length in 1..128 && id != identity?.deviceId)
                     PeerDevice(id, json.optString("name", "MeshDrop").take(64), kind,
-                        endpoint.host, endpoint.port, transferLane = TransportLane.WIFI_LAN)
+                        endpoint.host, endpoint.port, transferLane = LocalNetworkInfo.laneForRemote(endpoint.host))
                 }
             }.getOrNull()
             if (peer != null && scanning && scanGeneration == generation) {

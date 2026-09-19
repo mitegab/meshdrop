@@ -157,4 +157,17 @@ class CryptoTest {
         assertNotEquals(identity.fingerprint, InMemoryIdentity().fingerprint)
         assertTrue(identity.fingerprint.matches(Regex("([0-9a-f]{2}:){5}[0-9a-f]{2}")))
     }
+    @Test
+    fun `claiming a trusted fingerprint with an attackers key cannot auto authenticate`() {
+        val trusted = InMemoryTrustedPeers()
+        val victim = InMemoryIdentity()
+        trusted.remember(victim.fingerprint, "Victim")
+        val alice = SessionNegotiator(InMemoryIdentity(), trusted)
+        val attacker = SessionNegotiator(InMemoryIdentity(), InMemoryTrustedPeers()).createOffer().material
+        val keys = alice.establish(EndpointRole.SENDER, alice.createOffer(), attacker.copy(fingerprint = victim.fingerprint))!!
+        assertFalse(keys.signatureValid)
+        assertFalse(keys.peerRemembered)
+        assertNotEquals(victim.fingerprint, keys.peerFingerprint)
+    }
+
 }

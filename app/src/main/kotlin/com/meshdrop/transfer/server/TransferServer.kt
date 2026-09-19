@@ -199,7 +199,7 @@ class TransferServer(
         val cutoff = System.currentTimeMillis() - 30 * 60_000L
         batches.entries.filter { it.value.lastActivity < cutoff && it.value.writing.isEmpty() && it.key !in handshakes }
             .forEach { forget(it.key) }
-        if (request.batchId !in batches && batches.size >= 64) {
+        if (!batches.containsKey(request.batchId) && batches.size >= 64) {
             val completed = batches.entries.filter { it.value.completed.size == it.value.request.files.size }
                 .minByOrNull { it.value.lastActivity }
             if (completed != null) forget(completed.key) else {

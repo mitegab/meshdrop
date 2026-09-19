@@ -162,6 +162,7 @@ class UdpBeaconDiscoveryStrategy(
             host = address,
             port = port,
             lastSeenMillis = now(),
+            transferLane = com.meshdrop.net.LocalNetworkInfo.laneForRemote(address),
         )
     }
 

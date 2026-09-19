@@ -689,9 +689,10 @@ private fun PersonRow(
 }
 
 private fun caption(peer: PeerDevice, latencyMillis: Long?): String {
-    if (!peer.isReachable()) return "${peer.kind.label} · finding an address"
+    if (!peer.isReachable()) return if (peer.kind == com.meshdrop.core.model.DiscoveryKind.WIFI_DIRECT)
+        "Wi-Fi Direct · tap to connect" else "${peer.kind.label} · finding an address"
     val latency = latencyMillis?.let { "$it ms" }
-    return listOfNotNull(peer.kind.label, latency, "tap to send").joinToString(" · ")
+    return listOfNotNull(peer.transferLane.shortLabel, latency, "tap to send").joinToString(" · ")
 }
 
 /** One finished transfer, on its way to the full Activity feed. */
